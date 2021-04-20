@@ -1,5 +1,7 @@
 # Vulkano backend for egui
 
+[![Latest version](https://img.shields.io/crates/v/egui_vulkano.svg)](https://crates.io/crates/egui_vulkano)
+
 This is a drawing backend to use [egui](https://github.com/emilk/egui) with [Vulkano](https://github.com/vulkano-rs/vulkano).
 It can be used with [egui_winit_platform](https://github.com/hasenbanck/egui_winit_platform) for input handling.
 

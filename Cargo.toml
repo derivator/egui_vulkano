@@ -2,6 +2,12 @@
 name = "egui_vulkano"
 version = "0.1.0"
 authors = ["derivator <derivator@users.noreply.github.com>"]
+license = "GPL-3.0-or-later"
+description = "Vulkano graphics backend for egui"
+homepage = "https://github.com/derivator/egui_vulkano"
+repository = "https://github.com/derivator/egui_vulkano"
+keywords = ["egui", "vulkano", "vulkan"]
+categories = ["gui", "game-development"]
 edition = "2018"
 
 [dependencies]

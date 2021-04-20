@@ -30,7 +30,8 @@ use egui::{Color32, FontDefinitions, Stroke, Ui};
 use egui_winit_platform::{Platform, PlatformDescriptor};
 use std::collections::VecDeque;
 use std::time::Instant;
-use vulkano::format::{Format};
+use vulkano::format::Format;
+use vulkano::image::view::ImageView;
 use winit::dpi::PhysicalSize;
 
 fn main() {
@@ -54,9 +55,7 @@ fn main() {
 
     let queue_family = physical
         .queue_families()
-        .find(|&q| {
-            q.supports_graphics() && surface.is_supported(q).unwrap_or(false)
-        })
+        .find(|&q| q.supports_graphics() && surface.is_supported(q).unwrap_or(false))
         .unwrap();
 
     let device_ext = DeviceExtensions {
@@ -400,9 +399,10 @@ fn window_size_dependent_setup(
     images
         .iter()
         .map(|image| {
+            let view = ImageView::new(image.clone()).unwrap();
             Arc::new(
                 Framebuffer::start(render_pass.clone())
-                    .add(image.clone())
+                    .add(view)
                     .unwrap()
                     .build()
                     .unwrap(),

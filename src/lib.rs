@@ -15,7 +15,7 @@ use vulkano::descriptor::PipelineLayoutAbstract;
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::framebuffer::{RenderPassAbstract, Subpass};
-use vulkano::image::Dimensions::Dim2d;
+use vulkano::image::ImageDimensions;
 use vulkano::image::{ImageCreationError, ImmutableImage, MipmapsCount};
 use vulkano::pipeline::blend::{AttachmentBlend, BlendFactor};
 use vulkano::pipeline::vertex::SingleBufferDefinition;
@@ -57,6 +57,7 @@ impl From<&epaint::Vertex> for Vertex {
 vulkano::impl_vertex!(Vertex, pos, uv, color);
 
 use thiserror::Error;
+use vulkano::image::view::{ImageView, ImageViewCreationError};
 use vulkano::memory::DeviceMemoryAllocError;
 
 #[derive(Error, Debug)]
@@ -71,6 +72,8 @@ pub enum PainterCreationError {
 pub enum UpdateSetError {
     #[error(transparent)]
     CreateTextureFailed(#[from] CreateTextureError),
+    #[error(transparent)]
+    CreateImageViewFailed(#[from] ImageViewCreationError),
     #[error(transparent)]
     IncorrectDefinition(#[from] PersistentDescriptorSetError),
     #[error(transparent)]
@@ -139,7 +142,7 @@ impl<Rp: RenderPassAbstract + Clone + Send + Sync + 'static> Painter<Rp> {
 
         let set = Arc::new(
             PersistentDescriptorSet::start(layout.clone())
-                .add_sampled_image(image, self.sampler.clone())?
+                .add_sampled_image(ImageView::new(image)?, self.sampler.clone())?
                 .build()?,
         );
 
@@ -304,9 +307,10 @@ fn create_font_texture(
     queue: Arc<Queue>,
     texture: Arc<epaint::Texture>,
 ) -> Result<Arc<EguiTexture>, CreateTextureError> {
-    let dimensions = Dim2d {
+    let dimensions = ImageDimensions::Dim2d {
         width: texture.width as u32,
         height: texture.height as u32,
+        array_layers: 1,
     };
 
     let image_data = &texture

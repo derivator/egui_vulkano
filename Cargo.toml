@@ -1,20 +1,18 @@
 [package]
 name = "egui_vulkano"
-version = "0.0.0"
+version = "0.1.0"
 authors = ["derivator <derivator@users.noreply.github.com>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-vulkano = "^0.21.0"
-vulkano-shaders = "^0.21.0"
-egui = "0.10.0"
-epaint = "0.10.0"
+vulkano = "0.22.0"
+vulkano-shaders = "0.22.0"
+egui = "0.11.0"
+epaint = "0.11.0"
 thiserror = "1.0"
 
 [dev-dependencies]
 winit = "0.24.0"
-vulkano-win = "^0.21"
-egui_winit_platform = { version = "^0.5", git = "https://github.com/hasenbanck/egui_winit_platform" }
-egui_demo_lib = "0.10.0"
+vulkano-win = "0.22.0"
+egui_winit_platform = "0.6.0"
+egui_demo_lib = "0.11.0"

@@ -323,8 +323,7 @@ fn create_font_texture(
         image_data.iter().cloned(),
         dimensions,
         MipmapsCount::One,
-        //Format::R8G8B8A8Srgb,
-        Format::R8G8B8A8Unorm, //TODO: verify what the right format is. For now this looks better.
+        Format::R8G8B8A8Unorm, // &texture.pixels uses linear color space
         queue,
     )?;
 

@@ -2,48 +2,44 @@
 /// Differences:
 /// * Set the correct color format for the swapchain
 /// * Second renderpass to draw the gui
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Instant;
+
+use egui::plot::{HLine, Line, Plot, Value, Values};
+use egui::{Color32, FontDefinitions, Ui};
+use egui_winit_platform::{Platform, PlatformDescriptor};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState, SubpassContents};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, DynamicState, SubpassContents,
+};
 use vulkano::device::{Device, DeviceExtensions};
-use vulkano::framebuffer::{Framebuffer, FramebufferAbstract, RenderPassAbstract, Subpass};
+use vulkano::format::Format;
+use vulkano::image::view::ImageView;
 use vulkano::image::{ImageUsage, SwapchainImage};
 use vulkano::instance::{Instance, PhysicalDevice};
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::pipeline::GraphicsPipeline;
-use vulkano::swapchain;
-use vulkano::swapchain::{
-    AcquireError, ColorSpace, FullscreenExclusive, PresentMode, SurfaceTransform, Swapchain,
-    SwapchainCreationError,
-};
-use vulkano::sync;
+use vulkano::render_pass::{Framebuffer, FramebufferAbstract, RenderPass, Subpass};
+use vulkano::swapchain::{AcquireError, ColorSpace, Swapchain, SwapchainCreationError};
 use vulkano::sync::{FlushError, GpuFuture};
-
+use vulkano::{swapchain, sync, Version};
 use vulkano_win::VkSurfaceBuild;
+use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
-use std::sync::Arc;
-
-use egui::plot::{Curve, HLine, Plot, Value};
-use egui::{Color32, FontDefinitions, Stroke, Ui};
-use egui_winit_platform::{Platform, PlatformDescriptor};
-use std::collections::VecDeque;
-use std::time::Instant;
-use vulkano::format::Format;
-use vulkano::image::view::ImageView;
-use winit::dpi::PhysicalSize;
-
 fn main() {
     let required_extensions = vulkano_win::required_extensions();
 
-    let instance = Instance::new(None, &required_extensions, None).unwrap();
+    let instance = Instance::new(None, Version::V1_0, &required_extensions, None).unwrap();
     let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
 
     println!(
         "Using device: {} (type: {:?})",
-        physical.name(),
-        physical.ty()
+        physical.properties().device_name.as_ref().unwrap(),
+        physical.properties().device_type.unwrap(),
     );
 
     let event_loop = EventLoop::new();
@@ -83,23 +79,15 @@ fn main() {
         let format = Format::B8G8R8A8Srgb;
         let dimensions: [u32; 2] = surface.window().inner_size().into();
 
-        Swapchain::new(
-            device.clone(),
-            surface.clone(),
-            caps.min_image_count,
-            format,
-            dimensions,
-            1,
-            ImageUsage::color_attachment(),
-            &queue,
-            SurfaceTransform::Identity,
-            alpha,
-            PresentMode::Fifo,
-            FullscreenExclusive::Default,
-            true,
-            ColorSpace::SrgbNonLinear,
-        )
-        .unwrap()
+        Swapchain::start(device.clone(), surface.clone())
+            .num_images(caps.min_image_count)
+            .format(format)
+            .dimensions(dimensions)
+            .usage(ImageUsage::color_attachment())
+            .sharing_mode(&queue)
+            .composite_alpha(alpha)
+            .build()
+            .unwrap()
     };
 
     let vertex_buffer = {
@@ -261,7 +249,7 @@ fn main() {
                 if recreate_swapchain {
                     let dimensions: [u32; 2] = surface.window().inner_size().into();
                     let (new_swapchain, new_images) =
-                        match swapchain.recreate_with_dimensions(dimensions) {
+                        match swapchain.recreate().dimensions(dimensions).build() {
                             Ok(r) => r,
                             Err(SwapchainCreationError::UnsupportedDimensions) => return,
                             Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
@@ -291,9 +279,10 @@ fn main() {
                 }
 
                 let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into()];
-                let mut builder = AutoCommandBufferBuilder::primary_one_time_submit(
+                let mut builder = AutoCommandBufferBuilder::primary(
                     device.clone(),
                     queue.family(),
+                    CommandBufferUsage::OneTimeSubmit,
                 )
                 .unwrap();
 
@@ -384,7 +373,7 @@ fn main() {
 
 fn window_size_dependent_setup(
     images: &[Arc<SwapchainImage<Window>>],
-    render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
+    render_pass: Arc<RenderPass>,
     dynamic_state: &mut DynamicState,
 ) -> Vec<Arc<dyn FramebufferAbstract + Send + Sync>> {
     let dimensions = images[0].dimensions();
@@ -430,21 +419,23 @@ impl Benchmark {
             .iter()
             .enumerate()
             .map(|(i, v)| Value::new(i as f64, *v * 1000.0));
-        let curve = Curve::from_values_iter(iter).color(Color32::BLUE);
-        let red = Stroke::new(2.0, Color32::RED);
-        let zero = HLine::new(0.0, Stroke::none());
-        let target = HLine::new(1000.0 / 60.0, red);
+        let curve = Line::new(Values::from_values_iter(iter)).color(Color32::BLUE);
+        // As of egui 0.13.0 it is impossible to set the color of an HLine
+        // see https://github.com/emilk/egui/issues/524
+        // let red = Stroke::new(2.0, Color32::RED);
+        let zero = HLine::new(0.0);
+        let target = HLine::new(1000.0 / 60.0);
 
-        let plot = Plot::default()
+        let plot = Plot::new("plot")
             .height(300.0)
             .width(700.0)
-            .curve(curve)
+            .line(curve)
             .hline(zero)
             .hline(target);
 
         ui.label("Time in milliseconds that each frame took to draw:");
         ui.add(plot);
-        ui.label("The red line marks the frametime target for drawing at 60 FPS.");
+        ui.label("The light blue line marks the frametime target for drawing at 60 FPS.");
     }
 
     pub fn push(&mut self, v: f64) {

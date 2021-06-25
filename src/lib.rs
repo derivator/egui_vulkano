@@ -169,8 +169,21 @@ impl<Rp: RenderPassAbstract + Clone + Send + Sync + 'static> Painter<Rp> {
         let mut offsets = Vec::<(usize, usize)>::with_capacity(num_meshes);
 
         for cm in clipped_meshes.iter() {
-            offsets.push((verts.len(), indices.len()));
             let (clip, mesh) = (cm.0, &cm.1);
+
+            // There's an incredibly weird edge case where epaint
+            // will give us meshes with no actual content in them.
+            // In that case, we skip rendering the mesh.
+            // This also fixes a crash within vulkano that occurs
+            // if we try to initialize a buffer with a length of 0
+            // and then later try to slice into it (vulkano forces
+            // a minimum size of 1 for all buffers, breaking an
+            // assertion for self.size() / mem::size_of::<T>()).
+            if mesh.vertices.len() == 0 || mesh.indices.len() == 0 {
+                continue;
+            }
+
+            offsets.push((verts.len(), indices.len()));
 
             for v in mesh.vertices.iter() {
                 verts.push(v.into());
@@ -183,6 +196,13 @@ impl<Rp: RenderPassAbstract + Clone + Send + Sync + 'static> Painter<Rp> {
             clips.push(clip);
         }
         offsets.push((verts.len(), indices.len()));
+
+        // Small optimization: If there's nothing to render,
+        // return here instead of taking time to create an
+        // empty (1 byte) buffer.
+        if clips.len() == 0 {
+            return Ok(());
+        }
 
         let (vertex_buf, index_buf) = self.create_buffers((verts, indices))?;
         for (idx, clip) in clips.iter().enumerate() {

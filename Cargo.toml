@@ -1,6 +1,6 @@
 [package]
 name = "egui_vulkano"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["derivator <derivator@users.noreply.github.com>", "Arc-blroth <45273859+Arc-blroth@users.noreply.github.com>"]
 license = "GPL-3.0-or-later"
 description = "Vulkano graphics backend for egui"

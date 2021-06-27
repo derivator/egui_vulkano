@@ -1,3 +1,6 @@
+/// The shaders used to render the gui
+
+/// The vertex shader
 pub mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
@@ -5,6 +8,7 @@ pub mod vs {
     }
 }
 
+/// The fragment shader
 pub mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",

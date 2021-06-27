@@ -1,3 +1,5 @@
+//! [egui](https://docs.rs/egui) rendering backend for [Vulkano](https://docs.rs/vulkano).
+
 use std::sync::Arc;
 
 use egui::{Color32, CtxRef, Rect};
@@ -24,7 +26,7 @@ use vulkano::pipeline::{
 use vulkano::sampler::{Filter, MipmapMode, Sampler, SamplerAddressMode, SamplerCreationError};
 use vulkano::sync::{FlushError, GpuFuture};
 
-pub mod shaders;
+mod shaders;
 
 #[derive(Default, Debug, Clone)]
 pub struct Vertex {
@@ -96,6 +98,7 @@ pub enum DrawError {
 
 pub type EguiPipeline = GraphicsPipeline<SingleBufferDefinition<Vertex>>;
 
+/// Contains everything needed to render the gui.
 pub struct Painter {
     pub texture_version: u64,
     pub device: Arc<Device>,
@@ -107,9 +110,8 @@ pub struct Painter {
 }
 
 impl Painter {
-    /// This is all you need to render your gui.
     /// Pass in your vulkano `Device`, `Queue` and the `Subpass`
-    /// that you want to use to render the gui
+    /// that you want to use to render the gui.
     pub fn new(
         device: Arc<Device>,
         queue: Arc<Queue>,
@@ -148,7 +150,7 @@ impl Painter {
         Ok(())
     }
 
-    /// Pass in the `ClippedShape`s that egui gives us to draw the gui
+    /// Pass in the `ClippedShape`s that egui gives us to draw the gui.
     pub fn draw<P>(
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,

@@ -10,7 +10,7 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, DrawIndexedError, DynamicState,
     PrimaryAutoCommandBuffer,
 };
-use vulkano::descriptor::descriptor_set::{
+use vulkano::descriptor_set::{
     DescriptorSet, PersistentDescriptorSet, PersistentDescriptorSetBuildError,
     PersistentDescriptorSetError,
 };
@@ -18,7 +18,6 @@ use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::{ImageCreationError, ImageDimensions, ImmutableImage, MipmapsCount};
 use vulkano::pipeline::blend::{AttachmentBlend, BlendFactor};
-use vulkano::pipeline::vertex::SingleBufferDefinition;
 use vulkano::pipeline::viewport::Scissor;
 use vulkano::pipeline::{
     GraphicsPipeline, GraphicsPipelineAbstract, GraphicsPipelineCreationError,
@@ -62,6 +61,7 @@ use thiserror::Error;
 use vulkano::command_buffer::pool::CommandPoolBuilderAlloc;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
 use vulkano::memory::DeviceMemoryAllocError;
+use vulkano::pipeline::vertex::BuffersDefinition;
 use vulkano::render_pass::Subpass;
 
 #[derive(Error, Debug)]
@@ -96,7 +96,7 @@ pub enum DrawError {
     DrawIndexedFailed(#[from] DrawIndexedError),
 }
 
-pub type EguiPipeline = GraphicsPipeline<SingleBufferDefinition<Vertex>>;
+pub type EguiPipeline = GraphicsPipeline<BuffersDefinition>;
 
 /// Contains everything needed to render the gui.
 pub struct Painter {
@@ -137,7 +137,7 @@ impl Painter {
         }
         self.texture_version = texture.version;
 
-        let layout = self.pipeline.layout().descriptor_set_layout(0).unwrap();
+        let layout = &self.pipeline.layout().descriptor_set_layouts()[0];
         let image = create_font_texture(self.queue.clone(), texture)?;
 
         let set = Arc::new(
@@ -224,10 +224,10 @@ impl Painter {
 
             //let vb_slice = vb.clone().slice(offset.0..end.0).unwrap(); does not work
             let vb_slice = BufferSlice::from_typed_buffer_access(vertex_buf.clone())
-                .slice(offset.0..end.0)
+                .slice(offset.0 as u64..end.0 as u64)
                 .unwrap();
             let ib_slice = BufferSlice::from_typed_buffer_access(index_buf.clone())
-                .slice(offset.1..end.1)
+                .slice(offset.1 as u64..end.1 as u64)
                 .unwrap();
 
             builder.draw_indexed(
@@ -237,7 +237,6 @@ impl Painter {
                 ib_slice,
                 self.set.as_ref().unwrap().clone(),
                 window_size_points,
-                vec![],
             )?;
         }
         Ok(())

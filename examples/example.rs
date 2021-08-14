@@ -13,11 +13,12 @@ use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, DynamicState, SubpassContents,
 };
+use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{ImageUsage, SwapchainImage};
-use vulkano::instance::{Instance, PhysicalDevice};
+use vulkano::instance::Instance;
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::render_pass::{Framebuffer, FramebufferAbstract, RenderPass, Subpass};
@@ -38,8 +39,8 @@ fn main() {
 
     println!(
         "Using device: {} (type: {:?})",
-        physical.properties().device_name.as_ref().unwrap(),
-        physical.properties().device_type.unwrap(),
+        physical.properties().device_name,
+        physical.properties().device_type,
     );
 
     let event_loop = EventLoop::new();
@@ -90,13 +91,13 @@ fn main() {
             .unwrap()
     };
 
-    let vertex_buffer = {
-        #[derive(Default, Debug, Clone)]
-        struct Vertex {
-            position: [f32; 2],
-        }
-        vulkano::impl_vertex!(Vertex, position);
+    #[derive(Default, Debug, Clone)]
+    struct Vertex {
+        position: [f32; 2],
+    }
+    vulkano::impl_vertex!(Vertex, position);
 
+    let vertex_buffer = {
         CpuAccessibleBuffer::from_iter(
             device.clone(),
             BufferUsage::all(),
@@ -172,7 +173,7 @@ fn main() {
 
     let pipeline = Arc::new(
         GraphicsPipeline::start()
-            .vertex_input_single_buffer()
+            .vertex_input_single_buffer::<Vertex>()
             .vertex_shader(vs.main_entry_point(), ())
             .triangle_list()
             .viewports_dynamic_scissors_irrelevant(1)
@@ -300,7 +301,6 @@ fn main() {
                         vertex_buffer.clone(),
                         (),
                         (),
-                        vec![],
                     )
                     .unwrap(); // Don't end the render pass yet
 

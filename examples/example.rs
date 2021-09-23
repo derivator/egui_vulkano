@@ -317,6 +317,11 @@ fn main() {
                         egui_test.ui(ui, &mut none);
                     });
 
+                egui::Window::new("Settings")
+                    .show(&egui_platform.context(), |ui| {
+                        &egui_platform.context().settings_ui(ui);
+                    });
+
                 egui::Window::new("Benchmark").default_height(600.0).show(
                     &egui_platform.context(),
                     |ui| {
@@ -325,7 +330,7 @@ fn main() {
                 );
 
                 // Get the shapes from egui
-                let (_output, clipped_shapes) = egui_platform.end_frame();
+                let (_output, clipped_shapes) = egui_platform.end_frame(None);
 
                 // Automatically start the next render subpass and draw the gui
                 egui_painter

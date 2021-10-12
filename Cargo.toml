@@ -1,6 +1,6 @@
 [package]
 name = "egui_vulkano"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["derivator <derivator@users.noreply.github.com>", "Arc-blroth <45273859+Arc-blroth@users.noreply.github.com>"]
 license = "GPL-3.0-or-later"
 description = "Vulkano graphics backend for egui"
@@ -13,12 +13,12 @@ edition = "2018"
 [dependencies]
 vulkano = "0.25.0"
 vulkano-shaders = "0.25.0"
-egui = "0.14.2"
-epaint = "0.14.0"
+egui = "0.15.0"
+epaint = "0.15.0"
 thiserror = "1.0"
 
 [dev-dependencies]
 winit = "0.25.0"
 vulkano-win = "0.25.0"
-egui_winit_platform = "0.10.0"
-egui_demo_lib = "0.14.0"
+egui-winit = "0.15.0"
+egui_demo_lib = "0.15.0"

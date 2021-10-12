@@ -7,8 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui::plot::{HLine, Line, Plot, Value, Values};
-use egui::{Color32, FontDefinitions, Ui};
-use egui_winit_platform::{Platform, PlatformDescriptor};
+use egui::{Color32, Ui};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, DynamicState, SubpassContents,
@@ -201,14 +200,8 @@ fn main() {
 
     //Set up everything need to draw the gui
     let window = surface.window();
-    let size = window.inner_size();
-    let mut egui_platform = Platform::new(PlatformDescriptor {
-        physical_width: size.width as u32,
-        physical_height: size.height as u32,
-        scale_factor: window.scale_factor(),
-        font_definitions: FontDefinitions::default(),
-        style: Default::default(),
-    });
+    let mut egui_ctx = egui::CtxRef::default();
+    let mut egui_winit = egui_winit::State::new(&window);
 
     let mut egui_painter = egui_vulkano::Painter::new(
         device.clone(),
@@ -222,15 +215,9 @@ fn main() {
     let mut egui_test = egui_demo_lib::ColorTest::default();
     let mut egui_bench = Benchmark::new(1000);
 
-    let start_time = Instant::now();
     let mut last_frame = Instant::now();
 
     event_loop.run(move |event, _, control_flow| {
-        egui_platform.handle_event(&event); //Let the gui handle events
-        if egui_platform.captures_event(&event) {
-            return; //Egui wants to handle this event, so ignore it
-        }
-
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -243,6 +230,12 @@ fn main() {
                 ..
             } => {
                 recreate_swapchain = true;
+            }
+            Event::WindowEvent { event, .. } => {
+                let egui_consumed_event = egui_winit.on_event(&egui_ctx, &event);
+                if !egui_consumed_event {
+                    // do your own event handling here
+                };
             }
             Event::RedrawEventsCleared => {
                 previous_frame_end.as_mut().unwrap().cleanup_finished();
@@ -307,38 +300,38 @@ fn main() {
                 // Build your gui
                 egui_bench.push(last_frame.elapsed().as_secs_f64());
                 last_frame = Instant::now();
-                egui_platform.update_time(start_time.elapsed().as_secs_f64());
-                egui_platform.begin_frame();
+
+                egui_ctx.begin_frame(egui_winit.take_egui_input(surface.window()));
 
                 egui::Window::new("Color test")
-                    .scroll(true)
-                    .show(&egui_platform.context(), |ui| {
+                    .vscroll(true)
+                    .show(&egui_ctx, |ui| {
                         let mut none = None;
                         egui_test.ui(ui, &mut none);
                     });
 
-                egui::Window::new("Settings")
-                    .show(&egui_platform.context(), |ui| {
-                        &egui_platform.context().settings_ui(ui);
+                egui::Window::new("Settings").show(&egui_ctx, |ui| {
+                    &egui_ctx.settings_ui(ui);
+                });
+
+                egui::Window::new("Benchmark")
+                    .default_height(600.0)
+                    .show(&egui_ctx, |ui| {
+                        egui_bench.draw(ui);
                     });
 
-                egui::Window::new("Benchmark").default_height(600.0).show(
-                    &egui_platform.context(),
-                    |ui| {
-                        egui_bench.draw(ui);
-                    },
-                );
-
                 // Get the shapes from egui
-                let (_output, clipped_shapes) = egui_platform.end_frame(None);
+                let (egui_output, clipped_shapes) = egui_ctx.end_frame();
+                egui_winit.handle_output(surface.window(), &egui_ctx, egui_output);
 
                 // Automatically start the next render subpass and draw the gui
+                let size = surface.window().inner_size();
                 egui_painter
                     .draw(
                         &mut builder,
                         &dynamic_state,
                         [size.width as f32, size.height as f32],
-                        &egui_platform.context(),
+                        &egui_ctx,
                         clipped_shapes,
                     )
                     .unwrap();

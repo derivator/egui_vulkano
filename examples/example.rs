@@ -310,12 +310,13 @@ fn main() {
                 egui_platform.update_time(start_time.elapsed().as_secs_f64());
                 egui_platform.begin_frame();
 
-                egui::Window::new("Color test")
-                    .scroll(true)
-                    .show(&egui_platform.context(), |ui| {
+                egui::Window::new("Color test").vscroll(true).show(
+                    &egui_platform.context(),
+                    |ui| {
                         let mut none = None;
                         egui_test.ui(ui, &mut none);
-                    });
+                    },
+                );
 
                 egui::Window::new("Benchmark").default_height(600.0).show(
                     &egui_platform.context(),
@@ -325,7 +326,7 @@ fn main() {
                 );
 
                 // Get the shapes from egui
-                let (_output, clipped_shapes) = egui_platform.end_frame();
+                let (_output, clipped_shapes) = egui_platform.end_frame(None);
 
                 // Automatically start the next render subpass and draw the gui
                 egui_painter

@@ -7,22 +7,25 @@ use epaint::{ClippedMesh, ClippedShape};
 use vulkano::buffer::{BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, DrawIndexedError, DynamicState,
+    AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, DrawIndexedError,
     PrimaryAutoCommandBuffer,
 };
 use vulkano::descriptor_set::{
-    DescriptorSet, PersistentDescriptorSet, PersistentDescriptorSetBuildError,
-    PersistentDescriptorSetError,
+    PersistentDescriptorSet, WriteDescriptorSet, DescriptorSetCreationError
 };
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::{ImageCreationError, ImageDimensions, ImmutableImage, MipmapsCount};
-use vulkano::pipeline::blend::{AttachmentBlend, BlendFactor};
-use vulkano::pipeline::viewport::Scissor;
-use vulkano::pipeline::{
-    GraphicsPipeline, GraphicsPipelineAbstract, GraphicsPipelineCreationError,
+use vulkano::pipeline::Pipeline;
+use vulkano::pipeline::PipelineBindPoint;
+use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState};
+use vulkano::pipeline::graphics::viewport::{Scissor, ViewportState};
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
+use vulkano::pipeline::graphics::{
+    GraphicsPipeline, GraphicsPipelineCreationError,
 };
-use vulkano::sampler::{Filter, MipmapMode, Sampler, SamplerAddressMode, SamplerCreationError};
+use vulkano::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreationError, SamplerMipmapMode};
 use vulkano::sync::{FlushError, GpuFuture};
 
 mod shaders;
@@ -61,7 +64,7 @@ use thiserror::Error;
 use vulkano::command_buffer::pool::CommandPoolBuilderAlloc;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
 use vulkano::memory::DeviceMemoryAllocError;
-use vulkano::pipeline::vertex::BuffersDefinition;
+use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::render_pass::Subpass;
 
 #[derive(Error, Debug)]
@@ -79,9 +82,7 @@ pub enum UpdateSetError {
     #[error(transparent)]
     CreateImageViewFailed(#[from] ImageViewCreationError),
     #[error(transparent)]
-    IncorrectDefinition(#[from] PersistentDescriptorSetError),
-    #[error(transparent)]
-    BuildFailed(#[from] PersistentDescriptorSetBuildError),
+    BuildFailed(#[from] DescriptorSetCreationError),
 }
 
 #[derive(Error, Debug)]
@@ -96,7 +97,7 @@ pub enum DrawError {
     DrawIndexedFailed(#[from] DrawIndexedError),
 }
 
-pub type EguiPipeline = GraphicsPipeline<BuffersDefinition>;
+pub type EguiPipeline = GraphicsPipeline;
 
 /// Contains everything needed to render the gui.
 pub struct Painter {
@@ -106,7 +107,7 @@ pub struct Painter {
     pub pipeline: Arc<EguiPipeline>,
     pub subpass: Subpass,
     pub sampler: Arc<Sampler>,
-    pub set: Option<Arc<dyn DescriptorSet + Send + Sync>>,
+    pub set: Option<Arc<PersistentDescriptorSet>>,
 }
 
 impl Painter {
@@ -131,7 +132,7 @@ impl Painter {
     }
 
     fn update_set(&mut self, egui_ctx: &CtxRef) -> Result<(), UpdateSetError> {
-        let texture = egui_ctx.texture();
+        let texture = egui_ctx.font_image();
         if texture.version == self.texture_version {
             return Ok(());
         }
@@ -140,11 +141,14 @@ impl Painter {
         let layout = &self.pipeline.layout().descriptor_set_layouts()[0];
         let image = create_font_texture(self.queue.clone(), texture)?;
 
-        let set = Arc::new(
-            PersistentDescriptorSet::start(layout.clone())
-                .add_sampled_image(ImageView::new(image)?, self.sampler.clone())?
-                .build()?,
-        );
+        let set = PersistentDescriptorSet::new(
+            layout.clone(),
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                ImageView::new(image)?,
+                self.sampler.clone()
+            )],
+        )?; 
 
         self.set = Some(set);
         Ok(())
@@ -154,7 +158,6 @@ impl Painter {
     pub fn draw<P>(
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
-        dynamic_state: &DynamicState,
         window_size_points: [f32; 2],
         egui_ctx: &CtxRef,
         clipped_shapes: Vec<ClippedShape>,
@@ -163,9 +166,17 @@ impl Painter {
         P: CommandPoolBuilderAlloc,
     {
         self.update_set(egui_ctx)?;
-        builder.next_subpass(Inline)?;
+        builder.next_subpass(Inline)?
+            .bind_pipeline_graphics(self.pipeline.clone())
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                self.set.as_ref().unwrap().clone(),
+            );
         let clipped_meshes: Vec<ClippedMesh> = egui_ctx.tessellate(clipped_shapes);
         let num_meshes = clipped_meshes.len();
+
         let mut verts = Vec::<Vertex>::with_capacity(num_meshes * 4);
         let mut indices = Vec::<u32>::with_capacity(num_meshes * 6);
         let mut clips = Vec::<Rect>::with_capacity(num_meshes);
@@ -209,15 +220,13 @@ impl Painter {
 
         let (vertex_buf, index_buf) = self.create_buffers((verts, indices))?;
         for (idx, clip) in clips.iter().enumerate() {
-            let mut ds = dynamic_state.clone();
             let mut scissors = Vec::with_capacity(1);
             let o = clip.min;
             let (w, h) = (clip.width() as u32, clip.height() as u32);
             scissors.push(Scissor {
-                origin: [o.x as i32, o.y as i32],
+                origin: [(o.x as u32), (o.y as u32)],
                 dimensions: [w, h],
             });
-            ds.scissors = Some(scissors);
 
             let offset = offsets[idx];
             let end = offsets[idx + 1];
@@ -230,14 +239,20 @@ impl Painter {
                 .slice(offset.1 as u64..end.1 as u64)
                 .unwrap();
 
-            builder.draw_indexed(
-                self.pipeline.clone(),
-                &ds,
-                vb_slice,
-                ib_slice,
-                self.set.as_ref().unwrap().clone(),
-                window_size_points,
-            )?;
+            builder.bind_vertex_buffers(0, vb_slice.clone())
+                .bind_index_buffer(ib_slice.clone())
+                .push_constants(
+                    self.pipeline.layout().clone(),
+                    0,
+                    window_size_points
+                )
+                .draw_indexed(
+                    ib_slice.len() as u32,
+                    1,
+                    0,
+                    0,
+                    0
+                )?;
         }
         Ok(())
     }
@@ -276,42 +291,41 @@ fn create_pipeline(
     device: Arc<Device>,
     subpass: Subpass,
 ) -> Result<Arc<EguiPipeline>, GraphicsPipelineCreationError> {
-    let vs = shaders::vs::Shader::load(device.clone()).unwrap();
-    let fs = shaders::fs::Shader::load(device.clone()).unwrap();
+    let vs = shaders::vs::load(device.clone()).unwrap();
+    let fs = shaders::fs::load(device.clone()).unwrap();
 
-    let mut blend = AttachmentBlend::alpha_blending();
+    let mut blend = AttachmentBlend::alpha();
     blend.color_source = BlendFactor::One;
 
-    let pipeline = Arc::new(
-        GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
-            .vertex_shader(vs.main_entry_point(), ())
-            .triangle_list()
-            .viewports_scissors_dynamic(1)
-            .fragment_shader(fs.main_entry_point(), ())
-            .cull_mode_disabled()
-            .blend_collective(blend)
-            .render_pass(subpass)
-            .build(device.clone())?,
-    );
+    let pipeline = GraphicsPipeline::start()
+        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .rasterization_state(
+            RasterizationState::new()
+                .cull_mode(CullMode::None)
+        )
+        .color_blend_state(ColorBlendState::new(subpass.num_color_attachments()).blend(blend))
+        .render_pass(subpass)
+        .build(device.clone())?;
     Ok(pipeline)
 }
 
 /// Create a texture sampler for the egui font texture
 fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationError> {
-    Sampler::new(
-        device.clone(),
-        Filter::Linear,
-        Filter::Linear,
-        MipmapMode::Linear,
-        SamplerAddressMode::ClampToEdge,
-        SamplerAddressMode::ClampToEdge,
-        SamplerAddressMode::ClampToEdge,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-    )
+    Sampler::start(device.clone())
+        .mag_filter(Filter::Linear)
+        .min_filter(Filter::Linear)
+        .mipmap_mode(SamplerMipmapMode::Linear)
+        .address_mode_u(SamplerAddressMode::ClampToEdge)
+        .address_mode_v(SamplerAddressMode::ClampToEdge)
+        .address_mode_w(SamplerAddressMode::ClampToEdge)
+        .mip_lod_bias(0.0)
+        .anisotropy(Some(1.0))
+        .min_lod(0.0)
+        .build()
 }
 
 type EguiTexture = ImmutableImage;
@@ -327,7 +341,7 @@ pub enum CreateTextureError {
 /// Create an image containing the egui font texture
 fn create_font_texture(
     queue: Arc<Queue>,
-    texture: Arc<epaint::Texture>,
+    texture: Arc<epaint::FontImage>,
 ) -> Result<Arc<EguiTexture>, CreateTextureError> {
     let dimensions = ImageDimensions::Dim2d {
         width: texture.width as u32,
@@ -345,7 +359,7 @@ fn create_font_texture(
         image_data.iter().cloned(),
         dimensions,
         MipmapsCount::One,
-        Format::R8G8B8A8Unorm, // &texture.pixels uses linear color space
+        Format::R8G8B8A8_UNORM, // &texture.pixels uses linear color space
         queue,
     )?;
 

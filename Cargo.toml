@@ -11,14 +11,14 @@ categories = ["gui", "game-development"]
 edition = "2018"
 
 [dependencies]
-vulkano = "0.25.0"
-vulkano-shaders = "0.25.0"
-egui = "0.15.0"
-epaint = "0.15.0"
+vulkano = "0.28.0"
+vulkano-shaders = "0.28.0"
+egui = "0.16.0"
+epaint = "0.16.0"
 thiserror = "1.0"
 
 [dev-dependencies]
-winit = "0.25.0"
-vulkano-win = "0.25.0"
-egui-winit = "0.15.0"
-egui_demo_lib = "0.15.0"
+winit = "0.26.0"
+vulkano-win = "0.28.0"
+egui-winit = "0.16.0"
+egui_demo_lib = "0.16.0"

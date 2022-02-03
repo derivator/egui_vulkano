@@ -5,27 +5,30 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
+use std::convert::TryInto;
 
 use egui::plot::{HLine, Line, Plot, Value, Values};
 use egui::{Color32, Ui};
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, DynamicState, SubpassContents,
+    AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents,
 };
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{ImageUsage, SwapchainImage};
+use vulkano::image::{ImageUsage, SwapchainImage, ImageAccess};
 use vulkano::instance::Instance;
-use vulkano::pipeline::viewport::Viewport;
+use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::GraphicsPipeline;
-use vulkano::render_pass::{Framebuffer, FramebufferAbstract, RenderPass, Subpass};
+use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::viewport::ViewportState;
+use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
 use vulkano::swapchain::{AcquireError, ColorSpace, Swapchain, SwapchainCreationError};
 use vulkano::sync::{FlushError, GpuFuture};
 use vulkano::{swapchain, sync, Version};
 use vulkano_win::VkSurfaceBuild;
-use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
@@ -44,7 +47,6 @@ fn main() {
 
     let event_loop = EventLoop::new();
     let surface = WindowBuilder::new()
-        .with_inner_size(PhysicalSize::new(1024, 768))
         .with_title("egui_vulkano demo")
         .build_vk_surface(&event_loop, instance.clone())
         .unwrap();
@@ -61,7 +63,9 @@ fn main() {
     let (device, mut queues) = Device::new(
         physical,
         physical.supported_features(),
-        &device_ext,
+        &physical
+            .required_extensions()
+            .union(&device_ext),
         [(queue_family, 0.5)].iter().cloned(),
     )
     .unwrap();
@@ -75,8 +79,8 @@ fn main() {
         // Set the swapchain format to Srgb to get correct colors for egui
         assert!(&caps
             .supported_formats
-            .contains(&(Format::B8G8R8A8Srgb, ColorSpace::SrgbNonLinear)));
-        let format = Format::B8G8R8A8Srgb;
+            .contains(&(Format::B8G8R8A8_SRGB, ColorSpace::SrgbNonLinear)));
+        let format = Format::B8G8R8A8_SRGB;
         let dimensions: [u32; 2] = surface.window().inner_size().into();
 
         Swapchain::start(device.clone(), surface.clone())
@@ -148,11 +152,10 @@ fn main() {
         }
     }
 
-    let vs = vs::Shader::load(device.clone()).unwrap();
-    let fs = fs::Shader::load(device.clone()).unwrap();
+    let vs = vs::load(device.clone()).unwrap();
+    let fs = fs::load(device.clone()).unwrap();
 
-    let render_pass = Arc::new(
-        vulkano::ordered_passes_renderpass!(
+    let render_pass = vulkano::ordered_passes_renderpass!(
             device.clone(),
             attachments: {
                 color: {
@@ -167,32 +170,25 @@ fn main() {
                 { color: [color], depth_stencil: {}, input: [] } // Create a second renderpass to draw egui
             ]
         )
-        .unwrap(),
-    );
+        .unwrap();
 
-    let pipeline = Arc::new(
-        GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
-            .vertex_shader(vs.main_entry_point(), ())
-            .triangle_list()
-            .viewports_dynamic_scissors_irrelevant(1)
-            .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-            .build(device.clone())
-            .unwrap(),
-    );
+    let pipeline = GraphicsPipeline::start()
+        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .render_pass(Subpass::from(render_pass.clone().into(), 0).unwrap())
+        .build(device.clone())
+        .unwrap();
 
-    let mut dynamic_state = DynamicState {
-        line_width: None,
-        viewports: None,
-        scissors: None,
-        compare_mask: None,
-        write_mask: None,
-        reference: None,
+    let mut viewport = Viewport {
+        origin: [0.0, 0.0],
+        dimensions: [0.0, 0.0],
+        depth_range: 0.0..1.0,
     };
 
-    let mut framebuffers =
-        window_size_dependent_setup(&images, render_pass.clone(), &mut dynamic_state);
+    let mut framebuffers = window_size_dependent_setup(&images, render_pass.clone(), &mut viewport);
 
     let mut recreate_swapchain = false;
 
@@ -201,7 +197,7 @@ fn main() {
     //Set up everything need to draw the gui
     let window = surface.window();
     let mut egui_ctx = egui::CtxRef::default();
-    let mut egui_winit = egui_winit::State::new(&window);
+    let mut egui_winit = egui_winit::State::new(window);
 
     let mut egui_painter = egui_vulkano::Painter::new(
         device.clone(),
@@ -253,8 +249,9 @@ fn main() {
                     framebuffers = window_size_dependent_setup(
                         &new_images,
                         render_pass.clone(),
-                        &mut dynamic_state,
+                        &mut viewport,
                     );
+                    viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
                     recreate_swapchain = false;
                 }
 
@@ -288,12 +285,14 @@ fn main() {
                         clear_values,
                     )
                     .unwrap()
+                    .set_viewport(0, [viewport.clone()])
+                    .bind_pipeline_graphics(pipeline.clone())
+                    .bind_vertex_buffers(0, vertex_buffer.clone())
                     .draw(
-                        pipeline.clone(),
-                        &dynamic_state,
-                        vertex_buffer.clone(),
-                        (),
-                        (),
+                        vertex_buffer.len().try_into().unwrap(),
+                        1,
+                        0,
+                        0,
                     )
                     .unwrap(); // Don't end the render pass yet
 
@@ -306,12 +305,11 @@ fn main() {
                 egui::Window::new("Color test")
                     .vscroll(true)
                     .show(&egui_ctx, |ui| {
-                        let mut none = None;
-                        egui_test.ui(ui, &mut none);
+                        egui_test.ui(ui, None);
                     });
 
                 egui::Window::new("Settings").show(&egui_ctx, |ui| {
-                    &egui_ctx.settings_ui(ui);
+                    egui_ctx.settings_ui(ui);
                 });
 
                 egui::Window::new("Benchmark")
@@ -326,11 +324,11 @@ fn main() {
 
                 // Automatically start the next render subpass and draw the gui
                 let size = surface.window().inner_size();
+                let sf: f32 = surface.window().scale_factor() as f32;
                 egui_painter
                     .draw(
                         &mut builder,
-                        &dynamic_state,
-                        [size.width as f32, size.height as f32],
+                        [(size.width as f32)/sf, (size.height as f32)/sf],
                         &egui_ctx,
                         clipped_shapes,
                     )
@@ -372,30 +370,23 @@ fn main() {
 fn window_size_dependent_setup(
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<RenderPass>,
-    dynamic_state: &mut DynamicState,
-) -> Vec<Arc<dyn FramebufferAbstract + Send + Sync>> {
-    let dimensions = images[0].dimensions();
+    viewport: &mut Viewport,
+) -> Vec<Arc<Framebuffer>> {
+    let dimensions = images[0].dimensions().width_height();
+    viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
 
-    let viewport = Viewport {
-        origin: [0.0, 0.0],
-        dimensions: [dimensions[0] as f32, dimensions[1] as f32],
-        depth_range: 0.0..1.0,
-    };
-    dynamic_state.viewports = Some(vec![viewport]);
-
-    images
+    let framebuffers = images
         .iter()
         .map(|image| {
             let view = ImageView::new(image.clone()).unwrap();
-            Arc::new(
-                Framebuffer::start(render_pass.clone())
-                    .add(view)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            ) as Arc<dyn FramebufferAbstract + Send + Sync>
+            Framebuffer::start(render_pass.clone())
+                .add(view)
+                .unwrap()
+                .build()
+                .unwrap()
         })
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+    framebuffers
 }
 
 pub struct Benchmark {
@@ -424,15 +415,14 @@ impl Benchmark {
         let zero = HLine::new(0.0);
         let target = HLine::new(1000.0 / 60.0);
 
-        let plot = Plot::new("plot")
-            .height(300.0)
-            .width(700.0)
-            .line(curve)
-            .hline(zero)
-            .hline(target);
-
         ui.label("Time in milliseconds that each frame took to draw:");
-        ui.add(plot);
+        Plot::new("plot")
+            .view_aspect(2.0)
+            .show(ui, |plot_ui| {
+                plot_ui.line(curve);
+                plot_ui.hline(zero);
+                plot_ui.hline(target);
+            });
         ui.label("The light blue line marks the frametime target for drawing at 60 FPS.");
     }
 

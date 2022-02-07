@@ -25,7 +25,6 @@ let (_output, clipped_shapes) = egui_ctx.end_frame();
 egui_painter
     .draw(
         &mut builder, // your vulkano AutoCommandBufferBuilder
-        &dynamic_state, // your vulkano DynamicState
         [width, height], // window size
         &egui_ctx, // your egui CtxRef
         clipped_shapes,

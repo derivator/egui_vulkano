@@ -227,6 +227,7 @@ impl Painter {
                 origin: [(o.x as u32), (o.y as u32)],
                 dimensions: [w, h],
             });
+            builder.set_scissor(0, scissors);
 
             let offset = offsets[idx];
             let end = offsets[idx + 1];
@@ -301,7 +302,7 @@ fn create_pipeline(
         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
         .vertex_shader(vs.entry_point("main").unwrap(), ())
         .input_assembly_state(InputAssemblyState::new())
-        .viewport_state(ViewportState::viewport_dynamic_scissor_irrelevant())
+        .viewport_state(ViewportState::viewport_dynamic_scissor_dynamic(1))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
         .rasterization_state(
             RasterizationState::new()

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui::plot::{HLine, Line, Plot, Value, Values};
-use egui::{Color32, Ui};
+use egui::{Color32, ColorImage, Ui};
 use egui_vulkano::UpdateTexturesResult;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
@@ -236,6 +236,7 @@ fn main() {
     let mut egui_test = egui_demo_lib::ColorTest::default();
     let mut demo_windows = egui_demo_lib::DemoWindows::default();
     let mut egui_bench = Benchmark::new(1000);
+    let mut my_texture = egui_ctx.load_texture("my_texture", ColorImage::example());
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -324,6 +325,14 @@ fn main() {
                     .show(&egui_ctx, |ui| {
                         egui_bench.draw(ui);
                     });
+
+                egui::Window::new("Texture test").show(&egui_ctx, |ui| {
+                    ui.image(my_texture.id(), (200.0, 200.0));
+                    if ui.button("Reload texture").clicked() {
+                        // previous TextureHandle is dropped, causing egui to free the texture:
+                        my_texture = egui_ctx.load_texture("my_texture", ColorImage::example());
+                    }
+                });
 
                 // Get the shapes from egui
                 let egui_output = egui_ctx.end_frame();

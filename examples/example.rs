@@ -3,35 +3,61 @@
 /// * Set the correct color format for the swapchain
 /// * Second renderpass to draw the gui
 use std::collections::VecDeque;
+use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::Instant;
-use std::convert::TryInto;
 
 use egui::plot::{HLine, Line, Plot, Value, Values};
 use egui::{Color32, Ui};
+use egui_vulkano::UpdateTexturesResult;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents,
-};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
 use vulkano::device::physical::PhysicalDevice;
 use vulkano::device::{Device, DeviceExtensions};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{ImageUsage, SwapchainImage, ImageAccess};
+use vulkano::image::{ImageAccess, ImageUsage, SwapchainImage};
 use vulkano::instance::Instance;
-use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::GraphicsPipeline;
-use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
+use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::graphics::viewport::ViewportState;
+use vulkano::pipeline::GraphicsPipeline;
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
 use vulkano::swapchain::{AcquireError, ColorSpace, Swapchain, SwapchainCreationError};
-use vulkano::sync::{FlushError, GpuFuture};
+use vulkano::sync::{FenceSignalFuture, FlushError, GpuFuture};
 use vulkano::{swapchain, sync, Version};
 use vulkano_win::VkSurfaceBuild;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowBuilder};
+use winit::window::{Fullscreen, Window, WindowBuilder};
+
+pub enum FrameEndFuture<F: GpuFuture + 'static> {
+    FenceSignalFuture(FenceSignalFuture<F>),
+    BoxedFuture(Box<dyn GpuFuture>),
+}
+
+impl<F: GpuFuture> FrameEndFuture<F> {
+    pub fn now(device: Arc<Device>) -> Self {
+        Self::BoxedFuture(sync::now(device).boxed())
+    }
+
+    pub fn get(self) -> Box<dyn GpuFuture> {
+        match self {
+            FrameEndFuture::FenceSignalFuture(f) => f.boxed(),
+            FrameEndFuture::BoxedFuture(f) => f,
+        }
+    }
+}
+
+impl<F: GpuFuture> AsMut<dyn GpuFuture> for FrameEndFuture<F> {
+    fn as_mut(&mut self) -> &mut (dyn GpuFuture + 'static) {
+        match self {
+            FrameEndFuture::FenceSignalFuture(f) => f,
+            FrameEndFuture::BoxedFuture(f) => f,
+        }
+    }
+}
 
 fn main() {
     let required_extensions = vulkano_win::required_extensions();
@@ -48,6 +74,7 @@ fn main() {
     let event_loop = EventLoop::new();
     let surface = WindowBuilder::new()
         .with_title("egui_vulkano demo")
+        .with_fullscreen(Some(Fullscreen::Borderless(None)))
         .build_vk_surface(&event_loop, instance.clone())
         .unwrap();
 
@@ -63,9 +90,7 @@ fn main() {
     let (device, mut queues) = Device::new(
         physical,
         physical.supported_features(),
-        &physical
-            .required_extensions()
-            .union(&device_ext),
+        &physical.required_extensions().union(&device_ext),
         [(queue_family, 0.5)].iter().cloned(),
     )
     .unwrap();
@@ -156,21 +181,21 @@ fn main() {
     let fs = fs::load(device.clone()).unwrap();
 
     let render_pass = vulkano::ordered_passes_renderpass!(
-            device.clone(),
-            attachments: {
-                color: {
-                    load: Clear,
-                    store: Store,
-                    format: swapchain.format(),
-                    samples: 1,
-                }
-            },
-            passes: [
-                { color: [color], depth_stencil: {}, input: [] },
-                { color: [color], depth_stencil: {}, input: [] } // Create a second renderpass to draw egui
-            ]
-        )
-        .unwrap();
+        device.clone(),
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store,
+                format: swapchain.format(),
+                samples: 1,
+            }
+        },
+        passes: [
+            { color: [color], depth_stencil: {}, input: [] },
+            { color: [color], depth_stencil: {}, input: [] } // Create a second renderpass to draw egui
+        ]
+    )
+    .unwrap();
 
     let pipeline = GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
@@ -192,12 +217,12 @@ fn main() {
 
     let mut recreate_swapchain = false;
 
-    let mut previous_frame_end = Some(sync::now(device.clone()).boxed());
+    let mut previous_frame_end = Some(FrameEndFuture::now(device.clone()));
 
     //Set up everything need to draw the gui
     let window = surface.window();
-    let mut egui_ctx = egui::CtxRef::default();
-    let mut egui_winit = egui_winit::State::new(window);
+    let egui_ctx = egui::Context::default();
+    let mut egui_winit = egui_winit::State::new(4096, window);
 
     let mut egui_painter = egui_vulkano::Painter::new(
         device.clone(),
@@ -209,9 +234,8 @@ fn main() {
     //Set up some window to look at for the test
 
     let mut egui_test = egui_demo_lib::ColorTest::default();
+    let mut demo_windows = egui_demo_lib::DemoWindows::default();
     let mut egui_bench = Benchmark::new(1000);
-
-    let mut last_frame = Instant::now();
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -234,7 +258,11 @@ fn main() {
                 };
             }
             Event::RedrawEventsCleared => {
-                previous_frame_end.as_mut().unwrap().cleanup_finished();
+                previous_frame_end
+                    .as_mut()
+                    .unwrap()
+                    .as_mut()
+                    .cleanup_finished();
 
                 if recreate_swapchain {
                     let dimensions: [u32; 2] = surface.window().inner_size().into();
@@ -277,35 +305,14 @@ fn main() {
                 )
                 .unwrap();
 
-                // Do your usual rendering
-                builder
-                    .begin_render_pass(
-                        framebuffers[image_num].clone(),
-                        SubpassContents::Inline,
-                        clear_values,
-                    )
-                    .unwrap()
-                    .set_viewport(0, [viewport.clone()])
-                    .bind_pipeline_graphics(pipeline.clone())
-                    .bind_vertex_buffers(0, vertex_buffer.clone())
-                    .draw(
-                        vertex_buffer.len().try_into().unwrap(),
-                        1,
-                        0,
-                        0,
-                    )
-                    .unwrap(); // Don't end the render pass yet
-
-                // Build your gui
-                egui_bench.push(last_frame.elapsed().as_secs_f64());
-                last_frame = Instant::now();
-
+                let frame_start = Instant::now();
                 egui_ctx.begin_frame(egui_winit.take_egui_input(surface.window()));
+                demo_windows.ui(&egui_ctx);
 
                 egui::Window::new("Color test")
                     .vscroll(true)
                     .show(&egui_ctx, |ui| {
-                        egui_test.ui(ui, None);
+                        egui_test.ui(ui);
                     });
 
                 egui::Window::new("Settings").show(&egui_ctx, |ui| {
@@ -319,8 +326,31 @@ fn main() {
                     });
 
                 // Get the shapes from egui
-                let (egui_output, clipped_shapes) = egui_ctx.end_frame();
-                egui_winit.handle_output(surface.window(), &egui_ctx, egui_output);
+                let egui_output = egui_ctx.end_frame();
+                let platform_output = egui_output.platform_output;
+                egui_winit.handle_platform_output(surface.window(), &egui_ctx, platform_output);
+
+                let result = egui_painter
+                    .update_textures(egui_output.textures_delta, &mut builder)
+                    .expect("egui texture error");
+
+                let wait_for_last_frame = result == UpdateTexturesResult::Changed;
+
+                // Do your usual rendering
+                builder
+                    .begin_render_pass(
+                        framebuffers[image_num].clone(),
+                        SubpassContents::Inline,
+                        clear_values,
+                    )
+                    .unwrap()
+                    .set_viewport(0, [viewport.clone()])
+                    .bind_pipeline_graphics(pipeline.clone())
+                    .bind_vertex_buffers(0, vertex_buffer.clone())
+                    .draw(vertex_buffer.len().try_into().unwrap(), 1, 0, 0)
+                    .unwrap(); // Don't end the render pass yet
+
+                // Build your gui
 
                 // Automatically start the next render subpass and draw the gui
                 let size = surface.window().inner_size();
@@ -328,20 +358,29 @@ fn main() {
                 egui_painter
                     .draw(
                         &mut builder,
-                        [(size.width as f32)/sf, (size.height as f32)/sf],
+                        [(size.width as f32) / sf, (size.height as f32) / sf],
                         &egui_ctx,
-                        clipped_shapes,
+                        egui_output.shapes,
                     )
                     .unwrap();
+
+                egui_bench.push(frame_start.elapsed().as_secs_f64());
 
                 // End the render pass as usual
                 builder.end_render_pass().unwrap();
 
                 let command_buffer = builder.build().unwrap();
 
+                if wait_for_last_frame {
+                    if let Some(FrameEndFuture::FenceSignalFuture(ref mut f)) = previous_frame_end {
+                        f.wait(None).unwrap();
+                    }
+                }
+
                 let future = previous_frame_end
                     .take()
                     .unwrap()
+                    .get()
                     .join(acquire_future)
                     .then_execute(queue.clone(), command_buffer)
                     .unwrap()
@@ -350,15 +389,15 @@ fn main() {
 
                 match future {
                     Ok(future) => {
-                        previous_frame_end = Some(future.boxed());
+                        previous_frame_end = Some(FrameEndFuture::FenceSignalFuture(future));
                     }
                     Err(FlushError::OutOfDate) => {
                         recreate_swapchain = true;
-                        previous_frame_end = Some(sync::now(device.clone()).boxed());
+                        previous_frame_end = Some(FrameEndFuture::now(device.clone()));
                     }
                     Err(e) => {
                         println!("Failed to flush future: {:?}", e);
-                        previous_frame_end = Some(sync::now(device.clone()).boxed());
+                        previous_frame_end = Some(FrameEndFuture::now(device.clone()));
                     }
                 }
             }
@@ -409,21 +448,17 @@ impl Benchmark {
             .enumerate()
             .map(|(i, v)| Value::new(i as f64, *v * 1000.0));
         let curve = Line::new(Values::from_values_iter(iter)).color(Color32::BLUE);
-        // As of egui 0.13.0 it is impossible to set the color of an HLine
-        // see https://github.com/emilk/egui/issues/524
-        // let red = Stroke::new(2.0, Color32::RED);
-        let zero = HLine::new(0.0);
-        let target = HLine::new(1000.0 / 60.0);
+        let target = HLine::new(1000.0 / 60.0).color(Color32::RED);
 
-        ui.label("Time in milliseconds that each frame took to draw:");
+        ui.label("Time in milliseconds that the gui took to draw:");
         Plot::new("plot")
             .view_aspect(2.0)
+            .include_y(0)
             .show(ui, |plot_ui| {
                 plot_ui.line(curve);
-                plot_ui.hline(zero);
-                plot_ui.hline(target);
+                plot_ui.hline(target)
             });
-        ui.label("The light blue line marks the frametime target for drawing at 60 FPS.");
+        ui.label("The red line marks the frametime target for drawing at 60 FPS.");
     }
 
     pub fn push(&mut self, v: f64) {

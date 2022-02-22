@@ -1,6 +1,6 @@
 [package]
 name = "egui_vulkano"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["derivator <derivator@users.noreply.github.com>", "Arc-blroth <45273859+Arc-blroth@users.noreply.github.com>"]
 license = "GPL-3.0-or-later"
 description = "Vulkano graphics backend for egui"
@@ -14,7 +14,6 @@ edition = "2021"
 vulkano = "0.28.0"
 vulkano-shaders = "0.28.0"
 egui = "0.16.1"
-epaint = "0.16.0"
 thiserror = "1.0"
 
 [dev-dependencies]
@@ -22,3 +21,8 @@ winit = "0.26.0"
 vulkano-win = "0.28.0"
 egui-winit = "0.16.0"
 egui_demo_lib = "0.16.0"
+
+[patch.crates-io]
+egui = { git = "https://github.com/emilk/egui", rev="31d324932c953cbbdd292dbae0cff2179cf83774" }
+egui-winit = { git = "https://github.com/emilk/egui", rev="31d324932c953cbbdd292dbae0cff2179cf83774" }
+egui_demo_lib = { git = "https://github.com/emilk/egui", rev="31d324932c953cbbdd292dbae0cff2179cf83774" }

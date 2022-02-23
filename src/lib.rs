@@ -121,7 +121,6 @@ pub struct Painter {
     queue: Arc<Queue>,
     /// Graphics pipeline used to render the gui.
     pub pipeline: Arc<GraphicsPipeline>,
-    subpass: Subpass,
     /// Texture sampler used to render the gui.
     pub sampler: Arc<Sampler>,
     images: HashMap<egui::TextureId, Arc<StorageImage>>,
@@ -143,7 +142,6 @@ impl Painter {
             device,
             queue,
             pipeline,
-            subpass,
             sampler,
             images: Default::default(),
             texture_sets: Default::default(),

@@ -196,7 +196,6 @@ impl Painter {
         P: CommandPoolBuilderAlloc,
     {
         for texture_id in textures_delta.free {
-            println!("Free: {:?}", texture_id);
             self.texture_free_queue.push(texture_id);
         }
 
@@ -204,7 +203,6 @@ impl Painter {
 
         for (texture_id, delta) in &textures_delta.set {
             let image = if delta.is_whole() {
-                println!("Create: {:?}", texture_id);
                 let image = create_image(self.queue.clone(), &delta.image)?;
                 let layout = &self.pipeline.layout().descriptor_set_layouts()[0];
 

@@ -4,14 +4,14 @@
 [![Documentation](https://docs.rs/egui_vulkano/badge.svg)](https://docs.rs/egui_vulkano)
 
 This is a drawing backend to use [egui](https://github.com/emilk/egui) with [Vulkano](https://github.com/vulkano-rs/vulkano).
-It can be used with [egui_winit_platform](https://github.com/hasenbanck/egui_winit_platform) for input handling.
+It can be used with [egui-winit](https://github.com/emilk/egui/tree/master/egui-winit) for input handling.
 
 ## Usage
 
 ```rust
 let mut egui_painter = egui_vulkano::Painter::new(
-    device.clone(), // your vulkano Device
-    queue.clone(), // your vulkano Queue
+    device.clone(), // your Vulkano Device
+    queue.clone(), // your Vulkano Queue
     Subpass::from(render_pass.clone(), 1).unwrap(), // subpass that you set up to render the gui
 )
 .unwrap();
@@ -19,7 +19,12 @@ let mut egui_painter = egui_vulkano::Painter::new(
 // ...
 
 // Get the shapes from egui
-let (_output, clipped_shapes) = egui_ctx.end_frame();
+let egui_output = egui_ctx.end_frame();
+let result = egui_painter.update_textures(egui_output.textures_delta, &mut builder).unwrap();
+// If using egui-winit:
+egui_winit.handle_platform_output(surface.window(), &egui_ctx, egui_output.platform_output);
+
+// Do your own rendering ...
 
 // Automatically start the next render subpass and draw the gui
 egui_painter
@@ -27,17 +32,14 @@ egui_painter
         &mut builder, // your vulkano AutoCommandBufferBuilder
         [width, height], // window size
         &egui_ctx, // your egui CtxRef
-        clipped_shapes,
+        egui_output.shapes // shapes from egui,
     )
     .unwrap();
 ```
 
 Check the included working [example](examples/example.rs) for more info.
 
-## Limitations
-
-At the moment there is no support for user textures. This is my first project with Vulkan/Vulkano
-and I make no guarantees about performance or correctness. **Pull requests are welcome!**
+**Pull requests are welcome!**
 
 ## Credits
 With inspiration from

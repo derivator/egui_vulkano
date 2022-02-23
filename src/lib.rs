@@ -34,7 +34,7 @@ use vulkano::sampler::{
 mod shaders;
 
 #[derive(Default, Debug, Clone)]
-pub struct Vertex {
+struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
     pub color: [f32; 4],
@@ -104,27 +104,33 @@ pub enum DrawError {
     DrawIndexedFailed(#[from] DrawIndexedError),
 }
 
-#[must_use]
+#[must_use = "You must use this to avoid attempting to modify a texture that's still in use"]
 #[derive(PartialEq)]
+/// You must use this to avoid attempting to modify a texture that's still in use.
 pub enum UpdateTexturesResult {
+    /// No texture will be modified in this frame.
     Unchanged,
+    /// A texture will be modified in this frame,
+    /// and you must wait for the last frame to finish before submitting the next command buffer.
     Changed,
 }
 
 /// Contains everything needed to render the gui.
 pub struct Painter {
-    pub device: Arc<Device>,
-    pub queue: Arc<Queue>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    /// Graphics pipeline used to render the gui.
     pub pipeline: Arc<GraphicsPipeline>,
-    pub subpass: Subpass,
+    subpass: Subpass,
+    /// Texture sampler used to render the gui.
     pub sampler: Arc<Sampler>,
-    pub images: HashMap<egui::TextureId, Arc<StorageImage>>,
-    pub texture_sets: HashMap<egui::TextureId, Arc<PersistentDescriptorSet>>,
-    pub texture_free_queue: Vec<egui::TextureId>,
+    images: HashMap<egui::TextureId, Arc<StorageImage>>,
+    texture_sets: HashMap<egui::TextureId, Arc<PersistentDescriptorSet>>,
+    texture_free_queue: Vec<egui::TextureId>,
 }
 
 impl Painter {
-    /// Pass in your vulkano `Device`, `Queue` and the `Subpass`
+    /// Pass in the vulkano [`Device`], [`Queue`] and [`Subpass`]
     /// that you want to use to render the gui.
     pub fn new(
         device: Arc<Device>,
@@ -183,10 +189,11 @@ impl Painter {
         Ok(())
     }
 
-    /// Upload newly created and changed textures to the GPU.
-    /// Call this before entering the first render pass. If the return value is `UpdateTexturesResult::Changed`,
+    /// Uploads all newly created and modified textures to the GPU.
+    /// Has to be called before entering the first render pass.  
+    /// If the return value is [`UpdateTexturesResult::Changed`],
     /// a texture will be changed in this frame and you need to wait for the last frame to finish
-    /// before submitting the command buffer for this frame
+    /// before submitting the command buffer for this frame.
     pub fn update_textures<P>(
         &mut self,
         textures_delta: TexturesDelta,
@@ -238,7 +245,7 @@ impl Painter {
         self.texture_free_queue.clear();
     }
 
-    /// Pass in the `ClippedShape`s that egui gives us to draw the gui.
+    /// Advances to the next rendering subpass and uses the [`ClippedShape`]s from [`egui::FullOutput`] to draw the gui.
     pub fn draw<P>(
         &mut self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
@@ -385,7 +392,7 @@ fn create_pipeline(
     Ok(pipeline)
 }
 
-/// Create a texture sampler for the egui font texture
+/// Create a texture sampler for the textures used by egui
 fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationError> {
     Sampler::start(device.clone())
         .mag_filter(Filter::Linear)
@@ -400,7 +407,7 @@ fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationEr
         .build()
 }
 
-/// Create an image containing the egui font texture
+/// Create a Vulkano image for the given egui texture
 fn create_image(
     queue: Arc<Queue>,
     texture: &ImageData,

@@ -7,26 +7,27 @@ use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytemuck::{Pod, Zeroable};
 use egui::plot::{HLine, Line, Plot, Value, Values};
 use egui::{Color32, ColorImage, Ui};
 use egui_vulkano::UpdateTexturesResult;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
-use vulkano::device::physical::PhysicalDevice;
-use vulkano::device::{Device, DeviceExtensions};
+use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::view::ImageView;
 use vulkano::image::{ImageAccess, ImageUsage, SwapchainImage};
-use vulkano::instance::Instance;
+use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::graphics::viewport::ViewportState;
 use vulkano::pipeline::GraphicsPipeline;
-use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
-use vulkano::swapchain::{AcquireError, ColorSpace, Swapchain, SwapchainCreationError};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError};
 use vulkano::sync::{FenceSignalFuture, FlushError, GpuFuture};
-use vulkano::{swapchain, sync, Version};
+use vulkano::{swapchain, sync};
 use vulkano_win::VkSurfaceBuild;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -61,8 +62,12 @@ impl<F: GpuFuture> AsMut<dyn GpuFuture> for FrameEndFuture<F> {
 
 fn main() {
     let required_extensions = vulkano_win::required_extensions();
+    let instance = Instance::new(InstanceCreateInfo {
+        enabled_extensions: required_extensions,
+        ..Default::default()
+    })
+    .unwrap();
 
-    let instance = Instance::new(None, Version::V1_0, &required_extensions, None).unwrap();
     let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
 
     println!(
@@ -78,48 +83,68 @@ fn main() {
         .build_vk_surface(&event_loop, instance.clone())
         .unwrap();
 
-    let queue_family = physical
-        .queue_families()
-        .find(|&q| q.supports_graphics() && surface.is_supported(q).unwrap_or(false))
-        .unwrap();
-
-    let device_ext = DeviceExtensions {
+    let device_extensions = DeviceExtensions {
         khr_swapchain: true,
         ..DeviceExtensions::none()
     };
+
+    let (physical_device, queue_family) = PhysicalDevice::enumerate(&instance)
+        .filter(|&p| p.supported_extensions().is_superset_of(&device_extensions))
+        .filter_map(|p| {
+            p.queue_families()
+                .find(|&q| q.supports_graphics() && q.supports_surface(&surface).unwrap_or(false))
+                .map(|q| (p, q))
+        })
+        .min_by_key(|(p, _)| match p.properties().device_type {
+            PhysicalDeviceType::DiscreteGpu => 0,
+            PhysicalDeviceType::IntegratedGpu => 1,
+            PhysicalDeviceType::VirtualGpu => 2,
+            PhysicalDeviceType::Cpu => 3,
+            PhysicalDeviceType::Other => 4,
+        })
+        .unwrap();
+
     let (device, mut queues) = Device::new(
-        physical,
-        physical.supported_features(),
-        &physical.required_extensions().union(&device_ext),
-        [(queue_family, 0.5)].iter().cloned(),
+        physical_device,
+        DeviceCreateInfo {
+            enabled_extensions: physical_device
+                .required_extensions()
+                .union(&device_extensions),
+            queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
+            ..Default::default()
+        },
     )
     .unwrap();
 
     let queue = queues.next().unwrap();
 
     let (mut swapchain, images) = {
-        let caps = surface.capabilities(physical).unwrap();
-        let alpha = caps.supported_composite_alpha.iter().next().unwrap();
+        let caps = physical_device
+            .surface_capabilities(&surface, Default::default())
+            .unwrap();
+        let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
 
-        // Set the swapchain format to Srgb to get correct colors for egui
-        assert!(&caps
-            .supported_formats
-            .contains(&(Format::B8G8R8A8_SRGB, ColorSpace::SrgbNonLinear)));
-        let format = Format::B8G8R8A8_SRGB;
-        let dimensions: [u32; 2] = surface.window().inner_size().into();
+        let image_format = Some(Format::B8G8R8A8_SRGB);
+        let image_extent: [u32; 2] = surface.window().inner_size().into();
 
-        Swapchain::start(device.clone(), surface.clone())
-            .num_images(caps.min_image_count)
-            .format(format)
-            .dimensions(dimensions)
-            .usage(ImageUsage::color_attachment())
-            .sharing_mode(&queue)
-            .composite_alpha(alpha)
-            .build()
-            .unwrap()
+        Swapchain::new(
+            device.clone(),
+            surface.clone(),
+            SwapchainCreateInfo {
+                min_image_count: caps.min_image_count,
+                image_format,
+                image_extent,
+                image_usage: ImageUsage::color_attachment(),
+                composite_alpha,
+
+                ..Default::default()
+            },
+        )
+        .unwrap()
     };
 
-    #[derive(Default, Debug, Clone)]
+    #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
+    #[repr(C)]
     struct Vertex {
         position: [f32; 2],
     }
@@ -186,7 +211,7 @@ fn main() {
             color: {
                 load: Clear,
                 store: Store,
-                format: swapchain.format(),
+                format: swapchain.image_format(),
                 samples: 1,
             }
         },
@@ -268,9 +293,12 @@ fn main() {
                 if recreate_swapchain {
                     let dimensions: [u32; 2] = surface.window().inner_size().into();
                     let (new_swapchain, new_images) =
-                        match swapchain.recreate().dimensions(dimensions).build() {
+                        match swapchain.recreate(SwapchainCreateInfo {
+                            image_extent: surface.window().inner_size().into(),
+                            ..swapchain.create_info()
+                        }) {
                             Ok(r) => r,
-                            Err(SwapchainCreationError::UnsupportedDimensions) => return,
+                            Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
                             Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
                         };
 
@@ -423,18 +451,20 @@ fn window_size_dependent_setup(
     let dimensions = images[0].dimensions().width_height();
     viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
 
-    let framebuffers = images
+    images
         .iter()
         .map(|image| {
-            let view = ImageView::new(image.clone()).unwrap();
-            Framebuffer::start(render_pass.clone())
-                .add(view)
-                .unwrap()
-                .build()
-                .unwrap()
+            let view = ImageView::new_default(image.clone()).unwrap();
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
         })
-        .collect::<Vec<_>>();
-    framebuffers
+        .collect::<Vec<_>>()
 }
 
 pub struct Benchmark {

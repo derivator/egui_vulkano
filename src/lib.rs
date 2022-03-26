@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
 
+use bytemuck::{Pod, Zeroable};
 use egui::epaint::{textures::TexturesDelta, ClippedMesh, ClippedShape, ImageData, ImageDelta};
 use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
@@ -28,12 +29,12 @@ use vulkano::pipeline::graphics::{GraphicsPipeline, GraphicsPipelineCreationErro
 use vulkano::pipeline::Pipeline;
 use vulkano::pipeline::PipelineBindPoint;
 use vulkano::sampler::{
-    Filter, Sampler, SamplerAddressMode, SamplerCreationError, SamplerMipmapMode,
+    Filter, Sampler, SamplerCreateInfo, SamplerCreationError, SamplerMipmapMode,
 };
-
 mod shaders;
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy, Zeroable, Pod)]
+#[repr(C)]
 struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
@@ -66,7 +67,7 @@ vulkano::impl_vertex!(Vertex, pos, uv, color);
 use thiserror::Error;
 use vulkano::command_buffer::pool::CommandPoolBuilderAlloc;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
-use vulkano::memory::DeviceMemoryAllocError;
+use vulkano::memory::DeviceMemoryAllocationError;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::render_pass::Subpass;
 
@@ -85,7 +86,7 @@ pub enum UpdateTexturesError {
     #[error(transparent)]
     BuildFailed(#[from] DescriptorSetCreationError),
     #[error(transparent)]
-    Alloc(#[from] DeviceMemoryAllocError),
+    Alloc(#[from] DeviceMemoryAllocationError),
     #[error(transparent)]
     Copy(#[from] CopyBufferImageError),
     #[error(transparent)]
@@ -99,7 +100,7 @@ pub enum DrawError {
     #[error(transparent)]
     NextSubpassFailed(#[from] AutoCommandBufferBuilderContextError),
     #[error(transparent)]
-    CreateBuffersFailed(#[from] DeviceMemoryAllocError),
+    CreateBuffersFailed(#[from] DeviceMemoryAllocationError),
     #[error(transparent)]
     DrawIndexedFailed(#[from] DrawIndexedError),
 }
@@ -209,13 +210,13 @@ impl Painter {
         for (texture_id, delta) in &textures_delta.set {
             let image = if delta.is_whole() {
                 let image = create_image(self.queue.clone(), &delta.image)?;
-                let layout = &self.pipeline.layout().descriptor_set_layouts()[0];
+                let layout = &self.pipeline.layout().set_layouts()[0];
 
                 let set = PersistentDescriptorSet::new(
                     layout.clone(),
                     [WriteDescriptorSet::image_view_sampler(
                         0,
-                        ImageView::new(image.clone())?,
+                        ImageView::new_default(image.clone())?,
                         self.sampler.clone(),
                     )],
                 )?;
@@ -346,7 +347,7 @@ impl Painter {
             Arc<CpuAccessibleBuffer<[Vertex]>>,
             Arc<CpuAccessibleBuffer<[u32]>>,
         ),
-        DeviceMemoryAllocError,
+        DeviceMemoryAllocationError,
     > {
         let vertex_buffer = CpuAccessibleBuffer::from_iter(
             self.device.clone(),
@@ -392,17 +393,15 @@ fn create_pipeline(
 
 /// Create a texture sampler for the textures used by egui
 fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationError> {
-    Sampler::start(device.clone())
-        .mag_filter(Filter::Linear)
-        .min_filter(Filter::Linear)
-        .mipmap_mode(SamplerMipmapMode::Linear)
-        .address_mode_u(SamplerAddressMode::ClampToEdge)
-        .address_mode_v(SamplerAddressMode::ClampToEdge)
-        .address_mode_w(SamplerAddressMode::ClampToEdge)
-        .mip_lod_bias(0.0)
-        .anisotropy(Some(1.0))
-        .min_lod(0.0)
-        .build()
+    Sampler::new(
+        device.clone(),
+        SamplerCreateInfo {
+            mag_filter: Filter::Linear,
+            min_filter: Filter::Linear,
+            mipmap_mode: SamplerMipmapMode::Linear,
+            ..Default::default()
+        },
+    )
 }
 
 /// Create a Vulkano image for the given egui texture

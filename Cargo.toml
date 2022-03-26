@@ -1,6 +1,6 @@
 [package]
 name = "egui_vulkano"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["derivator <derivator@users.noreply.github.com>", "Arc-blroth <45273859+Arc-blroth@users.noreply.github.com>"]
 license = "GPL-3.0-or-later"
 description = "Vulkano graphics backend for egui"
@@ -11,13 +11,14 @@ categories = ["gui", "game-development"]
 edition = "2021"
 
 [dependencies]
-vulkano = "0.28.0"
-vulkano-shaders = "0.28.0"
+vulkano = "0.29.0"
+vulkano-shaders = "0.29.0"
+bytemuck = "1.8.0"
 egui = "0.17.0"
 thiserror = "1.0"
 
 [dev-dependencies]
 winit = "0.26.0"
-vulkano-win = "0.28.0"
+vulkano-win = "0.29.0"
 egui-winit = "0.17.0"
 egui_demo_lib = "0.17.0"

@@ -295,15 +295,15 @@ impl Painter {
         if clips.len() == 0 {
             return Ok(());
         }
-
+        let ppp = egui_ctx.pixels_per_point();
         let (vertex_buf, index_buf) = self.create_buffers((verts, indices))?;
         for (idx, clip) in clips.iter().enumerate() {
             let mut scissors = Vec::with_capacity(1);
             let o = clip.min;
-            let (w, h) = (clip.width() as u32, clip.height() as u32);
+            let (w, h) = ((clip.width()*ppp) as u32, (clip.height()*ppp) as u32);
             scissors.push(Scissor {
                 origin: [(o.x as u32), (o.y as u32)],
-                dimensions: [w, h],
+                dimensions: [(window_size_points[0] * ppp) as u32, (window_size_points[1] * ppp) as u32],
             });
             builder.set_scissor(0, scissors);
 
@@ -414,7 +414,7 @@ fn create_image(
         height: texture.height() as u32,
         array_layers: 1,
     };
-
+    
     let format = match texture {
         ImageData::Color(_) => Format::R8G8B8A8_SRGB,
         ImageData::Alpha(_) => Format::R8G8B8A8_UNORM,

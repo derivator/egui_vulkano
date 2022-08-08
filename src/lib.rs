@@ -11,18 +11,13 @@ use egui::epaint::{
 use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, CopyBufferImageError,
-    DrawIndexedError, PrimaryAutoCommandBuffer,
-};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, BufferImageCopy, CopyBufferToImageInfo, CopyError, DrawIndexedError, PrimaryAutoCommandBuffer, RenderPassError};
 use vulkano::descriptor_set::{
     DescriptorSetCreationError, PersistentDescriptorSet, WriteDescriptorSet,
 };
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
-use vulkano::image::{
-    ImageCreateFlags, ImageCreationError, ImageDimensions, ImageUsage, StorageImage,
-};
+use vulkano::image::{ImageAccess, ImageCreateFlags, ImageCreationError, ImageDimensions, ImageSubresourceLayers, ImageUsage, StorageImage};
 use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
@@ -90,7 +85,7 @@ pub enum UpdateTexturesError {
     #[error(transparent)]
     Alloc(#[from] DeviceMemoryAllocationError),
     #[error(transparent)]
-    Copy(#[from] CopyBufferImageError),
+    Copy(#[from] CopyError),
     #[error(transparent)]
     CreateImage(#[from] ImageCreationError),
 }
@@ -105,6 +100,8 @@ pub enum DrawError {
     CreateBuffersFailed(#[from] DeviceMemoryAllocationError),
     #[error(transparent)]
     DrawIndexedFailed(#[from] DrawIndexedError),
+    #[error(transparent)]
+    RenderPassFailed(#[from] RenderPassError),
 }
 
 #[must_use = "You must use this to avoid attempting to modify a texture that's still in use"]
@@ -175,7 +172,7 @@ impl Painter {
 
         let img_buffer = CpuAccessibleBuffer::from_iter(
             self.device.clone(),
-            BufferUsage::transfer_source(),
+            BufferUsage::transfer_src(),
             false,
             image_data,
         )?;
@@ -185,8 +182,18 @@ impl Painter {
             None => [0, 0, 0],
             Some(pos) => [pos[0] as u32, pos[1] as u32, 0],
         };
-
-        builder.copy_buffer_to_image_dimensions(img_buffer, image, offset, size, 0, 1, 0)?;
+//, offset, size, 0, 1, 0).regions
+        builder.copy_buffer_to_image(CopyBufferToImageInfo {
+            regions: [
+                BufferImageCopy {
+                    image_extent: size,
+                    image_offset: offset,
+                    image_subresource: image.subresource_layers(),
+                    ..Default::default()
+                }
+            ].into(),
+            ..CopyBufferToImageInfo::buffer_image(img_buffer, image)
+        })?;
         Ok(())
     }
 
@@ -426,7 +433,7 @@ fn create_image(
     let format = Format::R8G8B8A8_SRGB;
 
     let usage = ImageUsage {
-        transfer_destination: true,
+        transfer_dst: true,
         sampled: true,
         storage: false,
         ..ImageUsage::none()

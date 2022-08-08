@@ -12,10 +12,10 @@ use egui::plot::{HLine, Line, Plot, Value, Values};
 use egui::{Color32, ColorImage, Ui};
 use egui_vulkano::UpdateTexturesResult;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassContents};
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo};
-use vulkano::format::Format;
+use vulkano::format::{ClearValue, Format};
 use vulkano::image::view::ImageView;
 use vulkano::image::{ImageAccess, ImageUsage, SwapchainImage};
 use vulkano::instance::{Instance, InstanceCreateInfo};
@@ -66,7 +66,7 @@ fn main() {
         enabled_extensions: required_extensions,
         ..Default::default()
     })
-    .unwrap();
+        .unwrap();
 
     let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
 
@@ -107,14 +107,12 @@ fn main() {
     let (device, mut queues) = Device::new(
         physical_device,
         DeviceCreateInfo {
-            enabled_extensions: physical_device
-                .required_extensions()
-                .union(&device_extensions),
+            enabled_extensions: device_extensions,
             queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
             ..Default::default()
         },
     )
-    .unwrap();
+        .unwrap();
 
     let queue = queues.next().unwrap();
 
@@ -140,7 +138,7 @@ fn main() {
                 ..Default::default()
             },
         )
-        .unwrap()
+            .unwrap()
     };
 
     #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
@@ -166,10 +164,10 @@ fn main() {
                     position: [0.25, -0.1],
                 },
             ]
-            .iter()
-            .cloned(),
+                .iter()
+                .cloned(),
         )
-        .unwrap()
+            .unwrap()
     };
 
     mod vs {
@@ -220,7 +218,7 @@ fn main() {
             { color: [color], depth_stencil: {}, input: [] } // Create a second renderpass to draw egui
         ]
     )
-    .unwrap();
+        .unwrap();
 
     let pipeline = GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
@@ -254,7 +252,7 @@ fn main() {
         queue.clone(),
         Subpass::from(render_pass.clone(), 1).unwrap(),
     )
-    .unwrap();
+        .unwrap();
 
     //Set up some window to look at for the test
 
@@ -326,13 +324,13 @@ fn main() {
                     recreate_swapchain = true;
                 }
 
-                let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into()];
+                let clear_values = vec![ClearValue::Float([0.0, 0.0, 1.0, 1.0]).into()];
                 let mut builder = AutoCommandBufferBuilder::primary(
                     device.clone(),
                     queue.family(),
                     CommandBufferUsage::OneTimeSubmit,
                 )
-                .unwrap();
+                    .unwrap();
 
                 let frame_start = Instant::now();
                 egui_ctx.begin_frame(egui_winit.take_egui_input(surface.window()));
@@ -376,9 +374,11 @@ fn main() {
                 // Do your usual rendering
                 builder
                     .begin_render_pass(
-                        framebuffers[image_num].clone(),
+                        RenderPassBeginInfo {
+                            clear_values,
+                            ..RenderPassBeginInfo::framebuffer(framebuffers[image_num].clone())
+                        },
                         SubpassContents::Inline,
-                        clear_values,
                     )
                     .unwrap()
                     .set_viewport(0, [viewport.clone()])
@@ -462,7 +462,7 @@ fn window_size_dependent_setup(
                     ..Default::default()
                 },
             )
-            .unwrap()
+                .unwrap()
         })
         .collect::<Vec<_>>()
 }

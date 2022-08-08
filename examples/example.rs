@@ -18,7 +18,7 @@ use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInf
 use vulkano::format::{ClearValue, Format};
 use vulkano::image::view::ImageView;
 use vulkano::image::{ImageAccess, ImageUsage, SwapchainImage};
-use vulkano::instance::{Instance, InstanceCreateInfo};
+use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::Viewport;
@@ -28,46 +28,48 @@ use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpa
 use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError};
 use vulkano::sync::{FenceSignalFuture, FlushError, GpuFuture};
 use vulkano::{swapchain, sync};
+use vulkano::instance::debug::{DebugUtilsMessenger, DebugUtilsMessengerCreateInfo};
 use vulkano_win::VkSurfaceBuild;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 
-pub enum FrameEndFuture<F: GpuFuture + 'static> {
-    FenceSignalFuture(FenceSignalFuture<F>),
-    BoxedFuture(Box<dyn GpuFuture>),
-}
+pub struct FrameEndFuture(Box<dyn GpuFuture>);
 
-impl<F: GpuFuture> FrameEndFuture<F> {
+impl FrameEndFuture {
     pub fn now(device: Arc<Device>) -> Self {
-        Self::BoxedFuture(sync::now(device).boxed())
+        Self(sync::now(device).boxed())
     }
 
     pub fn get(self) -> Box<dyn GpuFuture> {
-        match self {
-            FrameEndFuture::FenceSignalFuture(f) => f.boxed(),
-            FrameEndFuture::BoxedFuture(f) => f,
-        }
+        self.0
     }
 }
 
-impl<F: GpuFuture> AsMut<dyn GpuFuture> for FrameEndFuture<F> {
+impl AsMut<dyn GpuFuture> for FrameEndFuture {
     fn as_mut(&mut self) -> &mut (dyn GpuFuture + 'static) {
-        match self {
-            FrameEndFuture::FenceSignalFuture(f) => f,
-            FrameEndFuture::BoxedFuture(f) => f,
-        }
+        self.0.as_mut()
     }
 }
 
 fn main() {
     let required_extensions = vulkano_win::required_extensions();
+    for layer in vulkano::instance::layers_list().unwrap() {
+        println!("Available layer: {}", layer.name());
+    }
     let instance = Instance::new(InstanceCreateInfo {
         enabled_extensions: required_extensions,
+        enabled_layers: vec!["VK_LAYER_KHRONOS_validation".into()],
         ..Default::default()
-    })
-        .unwrap();
-
+    }).unwrap();
+    let _callback = unsafe {
+        DebugUtilsMessenger::new(
+            instance.clone(),
+            DebugUtilsMessengerCreateInfo::user_callback(Arc::new(|msg| {
+                println!("Debug callback: {:?}", msg.description);
+            })),
+        ).ok()
+    };
     let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
 
     println!(
@@ -240,7 +242,7 @@ fn main() {
 
     let mut recreate_swapchain = false;
 
-    let mut previous_frame_end = Some(FrameEndFuture::now(device.clone()));
+    let mut previous_frame_end: Option<Box<dyn GpuFuture>> = Some(sync::now(device.clone()).boxed());
 
     //Set up everything need to draw the gui
     let window = surface.window();
@@ -365,11 +367,9 @@ fn main() {
                 let platform_output = egui_output.platform_output;
                 egui_winit.handle_platform_output(surface.window(), &egui_ctx, platform_output);
 
-                let result = egui_painter
-                    .update_textures(egui_output.textures_delta, &mut builder)
+                let tex_future = egui_painter
+                    .update_textures(egui_output.textures_delta)
                     .expect("egui texture error");
-
-                let wait_for_last_frame = result == UpdateTexturesResult::Changed;
 
                 // Do your usual rendering
                 builder
@@ -406,18 +406,11 @@ fn main() {
                 builder.end_render_pass().unwrap();
 
                 let command_buffer = builder.build().unwrap();
-
-                if wait_for_last_frame {
-                    if let Some(FrameEndFuture::FenceSignalFuture(ref mut f)) = previous_frame_end {
-                        f.wait(None).unwrap();
-                    }
+                let mut future_mut = acquire_future.join(tex_future).boxed();
+                if let Some(future) = previous_frame_end.take() {
+                    future_mut = future_mut.join(future).boxed();
                 }
-
-                let future = previous_frame_end
-                    .take()
-                    .unwrap()
-                    .get()
-                    .join(acquire_future)
+                let future = future_mut
                     .then_execute(queue.clone(), command_buffer)
                     .unwrap()
                     .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
@@ -425,15 +418,16 @@ fn main() {
 
                 match future {
                     Ok(future) => {
-                        previous_frame_end = Some(FrameEndFuture::FenceSignalFuture(future));
+                        future.wait(None).unwrap();
+                        previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                     Err(FlushError::OutOfDate) => {
                         recreate_swapchain = true;
-                        previous_frame_end = Some(FrameEndFuture::now(device.clone()));
+                        previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                     Err(e) => {
                         println!("Failed to flush future: {:?}", e);
-                        previous_frame_end = Some(FrameEndFuture::now(device.clone()));
+                        previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                 }
             }

@@ -11,13 +11,13 @@ use egui::epaint::{
 use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
-use vulkano::command_buffer::{AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, BufferImageCopy, CopyBufferToImageInfo, CopyError, DrawIndexedError, PrimaryAutoCommandBuffer, RenderPassError};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, BufferImageCopy, CommandBufferExecFuture, CommandBufferUsage, CopyBufferToImageInfo, CopyError, CopyImageInfo, DrawIndexedError, PrimaryAutoCommandBuffer, PrimaryCommandBuffer, RenderPassError};
 use vulkano::descriptor_set::{
     DescriptorSetCreationError, PersistentDescriptorSet, WriteDescriptorSet,
 };
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
-use vulkano::image::{ImageAccess, ImageCreateFlags, ImageCreationError, ImageDimensions, ImageSubresourceLayers, ImageUsage, StorageImage};
+use vulkano::image::{ImageAccess, ImageCreateFlags, ImageCreationError, ImageDimensions, ImageLayout, ImageSubresourceLayers, ImageUsage, ImmutableImage, MipmapsCount, StorageImage};
 use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
@@ -63,10 +63,13 @@ vulkano::impl_vertex!(Vertex, pos, uv, color);
 
 use thiserror::Error;
 use vulkano::command_buffer::pool::CommandPoolBuilderAlloc;
+use vulkano::image::immutable::ImmutableImageCreationError;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
 use vulkano::memory::DeviceMemoryAllocationError;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::render_pass::Subpass;
+use vulkano::sync;
+use vulkano::sync::{GpuFuture, NowFuture};
 
 #[derive(Error, Debug)]
 pub enum PainterCreationError {
@@ -88,6 +91,8 @@ pub enum UpdateTexturesError {
     Copy(#[from] CopyError),
     #[error(transparent)]
     CreateImage(#[from] ImageCreationError),
+    #[error(transparent)]
+    ImmutableCreateImage(#[from] ImmutableImageCreationError),
 }
 
 #[derive(Error, Debug)]
@@ -123,9 +128,9 @@ pub struct Painter {
     pub pipeline: Arc<GraphicsPipeline>,
     /// Texture sampler used to render the gui.
     pub sampler: Arc<Sampler>,
-    images: HashMap<egui::TextureId, Arc<StorageImage>>,
-    texture_sets: HashMap<egui::TextureId, Arc<PersistentDescriptorSet>>,
-    texture_free_queue: Vec<egui::TextureId>,
+    images: HashMap<TextureId, Arc<ImmutableImage>>,
+    texture_sets: HashMap<TextureId, Arc<PersistentDescriptorSet>>,
+    texture_free_queue: Vec<TextureId>,
 }
 
 impl Painter {
@@ -149,76 +154,37 @@ impl Painter {
         })
     }
 
-    fn write_image_delta<P>(
-        &mut self,
-        image: Arc<StorageImage>,
-        delta: &ImageDelta,
-        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
-    ) -> Result<(), UpdateTexturesError>
-    where
-        P: CommandPoolBuilderAlloc,
-    {
-        let image_data = match &delta.image {
-            ImageData::Color(image) => image
-                .pixels
-                .iter()
-                .flat_map(|c| c.to_array())
-                .collect::<Vec<_>>(),
-            ImageData::Font(image) => image
-                .srgba_pixels(1.0)
-                .flat_map(|c| c.to_array())
-                .collect::<Vec<_>>(),
-        };
-
-        let img_buffer = CpuAccessibleBuffer::from_iter(
-            self.device.clone(),
-            BufferUsage::transfer_src(),
-            false,
-            image_data,
-        )?;
-
-        let size = [delta.image.width() as u32, delta.image.height() as u32, 1];
-        let offset = match delta.pos {
-            None => [0, 0, 0],
-            Some(pos) => [pos[0] as u32, pos[1] as u32, 0],
-        };
-//, offset, size, 0, 1, 0).regions
-        builder.copy_buffer_to_image(CopyBufferToImageInfo {
-            regions: [
-                BufferImageCopy {
-                    image_extent: size,
-                    image_offset: offset,
-                    image_subresource: image.subresource_layers(),
-                    ..Default::default()
-                }
-            ].into(),
-            ..CopyBufferToImageInfo::buffer_image(img_buffer, image)
-        })?;
-        Ok(())
-    }
-
     /// Uploads all newly created and modified textures to the GPU.
     /// Has to be called before entering the first render pass.  
     /// If the return value is [`UpdateTexturesResult::Changed`],
     /// a texture will be changed in this frame and you need to wait for the last frame to finish
     /// before submitting the command buffer for this frame.
-    pub fn update_textures<P>(
+    pub fn update_textures(
         &mut self,
         textures_delta: TexturesDelta,
-        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
-    ) -> Result<UpdateTexturesResult, UpdateTexturesError>
-    where
-        P: CommandPoolBuilderAlloc,
+    ) -> Result<impl GpuFuture, UpdateTexturesError>
     {
         for texture_id in textures_delta.free {
             self.texture_free_queue.push(texture_id);
         }
 
-        let mut result = UpdateTexturesResult::Unchanged;
+        let mut cbb = AutoCommandBufferBuilder::primary(
+            self.queue.device().clone(),
+            self.queue.family(),
+            CommandBufferUsage::OneTimeSubmit,
+        ).map_err(ImmutableImageCreationError::from)?;
 
         for (texture_id, delta) in &textures_delta.set {
-            let image = if delta.is_whole() {
-                let image = create_image(self.queue.clone(), &delta.image)?;
+
+                let image = if let Some(image) = self.images.remove(texture_id) {
+                    if delta.is_whole() {
+                        create_immutable_image_full(&self.queue, &delta.image, &mut cbb)?
+                    } else {
+                        create_immutable_image_part(&self.queue, &delta, &image, &mut cbb)?
+                    }
+                } else {
+                    create_immutable_image_full(&self.queue, &delta.image, &mut cbb)?
+                };
                 let layout = &self.pipeline.layout().set_layouts()[0];
 
                 let set = PersistentDescriptorSet::new(
@@ -232,15 +198,14 @@ impl Painter {
 
                 self.texture_sets.insert(*texture_id, set);
                 self.images.insert(*texture_id, image.clone());
-                image
-            } else {
-                result = UpdateTexturesResult::Changed; //modifying an existing image that might be in use
-                self.images[texture_id].clone()
-            };
-            self.write_image_delta(image, delta, builder)?;
         }
+        let cb = cbb.build().unwrap();
 
-        Ok(result)
+        let future = match cb.execute(self.queue.clone()) {
+            Ok(f) => f,
+            Err(e) => unreachable!("{:?}", e),
+        };
+        Ok(future)
     }
 
     /// Free textures freed by egui, *after* drawing
@@ -420,11 +385,11 @@ fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationEr
     )
 }
 
-/// Create a Vulkano image for the given egui texture
-fn create_image(
-    queue: Arc<Queue>,
+fn create_immutable_image_full(
+    queue: &Arc<Queue>,
     texture: &ImageData,
-) -> Result<Arc<StorageImage>, ImageCreationError> {
+    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>
+) -> Result<Arc<ImmutableImage>, ImmutableImageCreationError> {
     let dimensions = ImageDimensions::Dim2d {
         width: texture.width() as u32,
         height: texture.height() as u32,
@@ -433,21 +398,107 @@ fn create_image(
 
     let format = Format::R8G8B8A8_SRGB;
 
-    let usage = ImageUsage {
-        transfer_dst: true,
-        sampled: true,
-        storage: false,
-        ..ImageUsage::none()
+    let image_data = match texture {
+        ImageData::Color(image) => image
+            .pixels
+            .iter()
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
+        ImageData::Font(image) => image
+            .srgba_pixels(1.0)
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
     };
 
-    let image = StorageImage::with_usage(
+    let img_buffer = CpuAccessibleBuffer::from_iter(
+        queue.device().clone(),
+        BufferUsage::transfer_src(),
+        false,
+        image_data,
+    )?;
+
+
+    let flags = ImageCreateFlags::none();
+    let layout = ImageLayout::ShaderReadOnlyOptimal;
+    let usage = ImageUsage {
+        transfer_dst: true,
+        transfer_src: true,
+        sampled: true,
+        ..ImageUsage::none()
+    };
+    let (image, initializer) = ImmutableImage::uninitialized(
         queue.device().clone(),
         dimensions,
         format,
+        MipmapsCount::One,
         usage,
-        ImageCreateFlags::none(),
-        [queue.family()],
+        flags,
+        layout,
+        vec![queue.family()],
     )?;
 
+    cbb.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(img_buffer, initializer)).unwrap();
+
+    Ok(image)
+}
+
+fn create_immutable_image_part(
+    queue: &Arc<Queue>,
+    delta: &ImageDelta,
+    old: &Arc<ImmutableImage>,
+    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>
+) -> Result<Arc<ImmutableImage>, ImmutableImageCreationError> {
+
+    let image_data = match &delta.image {
+        ImageData::Color(image) => image
+            .pixels
+            .iter()
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
+        ImageData::Font(image) => image
+            .srgba_pixels(1.0)
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
+    };
+
+    let img_buffer = CpuAccessibleBuffer::from_iter(
+        queue.device().clone(),
+        BufferUsage::transfer_src(),
+        false,
+        image_data,
+    )?;
+
+    let flags = ImageCreateFlags::none();
+    let layout = ImageLayout::ShaderReadOnlyOptimal;
+
+    let (image, initializer) = ImmutableImage::uninitialized(
+        queue.device().clone(),
+        old.dimensions(),
+        old.format(),
+        MipmapsCount::One,
+        old.usage().clone(),
+        flags,
+        layout,
+        vec![queue.family()],
+    )?;
+
+    cbb.copy_image(CopyImageInfo::images(old.clone(), initializer.clone())).unwrap();
+
+    let size = [delta.image.width() as u32, delta.image.height() as u32, 1];
+    let offset = match delta.pos {
+        None => [0, 0, 0],
+        Some(pos) => [pos[0] as u32, pos[1] as u32, 0],
+    };
+    cbb.copy_buffer_to_image(CopyBufferToImageInfo {
+        regions: [
+            BufferImageCopy {
+                image_extent: size,
+                image_offset: offset,
+                image_subresource: initializer.subresource_layers(),
+                ..Default::default()
+            }
+        ].into(),
+        ..CopyBufferToImageInfo::buffer_image(img_buffer, initializer)
+    }).unwrap();
     Ok(image)
 }

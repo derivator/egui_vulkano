@@ -304,13 +304,14 @@ impl Painter {
             return Ok(());
         }
 
+        let sf = egui_ctx.pixels_per_point();
         let (vertex_buf, index_buf) = self.create_buffers((verts, indices))?;
         for (idx, clip) in clips.iter().enumerate() {
             let mut scissors = Vec::with_capacity(1);
             let o = clip.min;
-            let (w, h) = (clip.width() as u32, clip.height() as u32);
+            let (w, h) = ((clip.width() * sf) as u32, (clip.height() * sf) as u32);
             scissors.push(Scissor {
-                origin: [(o.x as u32), (o.y as u32)],
+                origin: [(o.x * sf) as u32, (o.y * sf) as u32],
                 dimensions: [w, h],
             });
             builder.set_scissor(0, scissors);

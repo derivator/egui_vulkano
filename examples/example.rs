@@ -390,7 +390,7 @@ fn main() {
                 // Build your gui
 
                 // Automatically start the next render subpass and draw the gui
-                let size = surface.window().inner_size().to_logical(surface.window().scale_factor());
+                let size = surface.window().inner_size().to_logical(egui_ctx.pixels_per_point() as _);
                 egui_painter
                     .draw(
                         &mut builder,

@@ -245,7 +245,7 @@ fn main() {
     let mut previous_frame_end = Some(FrameEndFuture::now(device.clone()));
 
     //Set up everything need to draw the gui
-    let window = surface.window();
+    let _window = surface.window();
     let egui_ctx = egui::Context::default();
     // let mut egui_winit = egui_winit::State::new(4096, window);
     let mut egui_winit = egui_winit::State::from_pixels_per_point(4096, 2.0);
@@ -392,7 +392,7 @@ fn main() {
 
                 // Automatically start the next render subpass and draw the gui
                 let size = surface.window().inner_size();
-                let sf: f32 = surface.window().scale_factor() as f32;
+                let _sf: f32 = surface.window().scale_factor() as f32;
                 let sf = 1.0;
                 println!("pixels per point {:?}, sf {:?} width {:?} height {:?}",
                     egui_ctx.pixels_per_point(),

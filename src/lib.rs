@@ -1,5 +1,5 @@
 //! [egui](https://docs.rs/egui) rendering backend for [Vulkano](https://docs.rs/vulkano).
-#![warn(missing_docs)]
+// #![warn(missing_docs)]
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
@@ -300,7 +300,7 @@ impl Painter {
         for (idx, clip) in clips.iter().enumerate() {
             let mut scissors = Vec::with_capacity(1);
             let o = clip.min;
-            let (w, h) = ((clip.width()*ppp) as u32, (clip.height()*ppp) as u32);
+            let (_w, _h) = ((clip.width()*ppp) as u32, (clip.height()*ppp) as u32);
             scissors.push(Scissor {
                 origin: [(o.x as u32), (o.y as u32)],
                 dimensions: [(window_size_points[0] * ppp) as u32, (window_size_points[1] * ppp) as u32],

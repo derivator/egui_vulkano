@@ -23,7 +23,7 @@ use vulkano::format::Format;
 use vulkano::image::{
     ImageCreateFlags, ImageCreationError, ImageDimensions, ImageUsage, StorageImage,
 };
-use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState};
+use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState, BlendOp};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
 use vulkano::pipeline::graphics::viewport::{Scissor, ViewportState};
@@ -383,8 +383,14 @@ fn create_pipeline(
     let vs = shaders::vs::load(device.clone()).unwrap();
     let fs = shaders::fs::load(device.clone()).unwrap();
 
-    let mut blend = AttachmentBlend::alpha();
-    blend.color_source = BlendFactor::One;
+    let mut blend = AttachmentBlend {
+        color_op: BlendOp::Add,
+        color_source: BlendFactor::One,
+        color_destination: BlendFactor::OneMinusSrcAlpha,
+        alpha_op: BlendOp::Add,
+        alpha_source: BlendFactor::One,
+        alpha_destination: BlendFactor::OneMinusSrcAlpha,
+    };
 
     let pipeline = GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())

@@ -5,8 +5,9 @@ use std::default::Default;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use egui::epaint::{ClippedShape, image::ImageDelta};
-use egui::{ClippedPrimitive, TexturesDelta, ImageData};
+use egui::epaint::{
+    textures::TexturesDelta, ClippedPrimitive, ClippedShape, ImageData, ImageDelta, Primitive,
+};
 use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
@@ -171,6 +172,7 @@ impl Painter {
                 .flat_map(|c| c.to_array())
                 .collect::<Vec<_>>(),
         };
+
         let img_buffer = CpuAccessibleBuffer::from_iter(
             self.device.clone(),
             BufferUsage::transfer_source(),
@@ -259,8 +261,8 @@ impl Painter {
             .next_subpass(Inline)?
             .bind_pipeline_graphics(self.pipeline.clone());
 
-        let clipped_meshes: Vec<ClippedPrimitive> = egui_ctx.tessellate(clipped_shapes);
-        let num_meshes = clipped_meshes.len();
+        let clipped_primitives: Vec<ClippedPrimitive> = egui_ctx.tessellate(clipped_shapes);
+        let num_meshes = clipped_primitives.len();
 
         let mut verts = Vec::<Vertex>::with_capacity(num_meshes * 4);
         let mut indices = Vec::<u32>::with_capacity(num_meshes * 6);
@@ -268,8 +270,14 @@ impl Painter {
         let mut texture_ids = Vec::<TextureId>::with_capacity(num_meshes);
         let mut offsets = Vec::<(usize, usize)>::with_capacity(num_meshes);
 
-        for cm in clipped_meshes.iter() {
-            let (clip, mesh) = (cm.clip_rect, &cm.primitive);
+        for cm in clipped_primitives.iter() {
+            let clip = cm.clip_rect;
+            let mesh = match &cm.primitive {
+                Primitive::Mesh(mesh) => mesh,
+                Primitive::Callback(_) => {
+                    continue; // callbacks not supported at the moment
+                }
+            };
 
             // Skip empty meshes
             if mesh.vertices.len() == 0 || mesh.indices.len() == 0 {
@@ -414,11 +422,8 @@ fn create_image(
         height: texture.height() as u32,
         array_layers: 1,
     };
-    
-    let format = match texture {
-        ImageData::Color(_) => Format::R8G8B8A8_SRGB,
-        ImageData::Alpha(_) => Format::R8G8B8A8_UNORM,
-    };
+
+    let format = Format::R8G8B8A8_SRGB;
 
     let usage = ImageUsage {
         transfer_destination: true,

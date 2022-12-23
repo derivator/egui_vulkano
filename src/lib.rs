@@ -5,7 +5,8 @@ use std::default::Default;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use egui::epaint::{textures::TexturesDelta, ClippedMesh, ClippedShape, ImageData, ImageDelta};
+use egui::epaint::{ClippedShape, image::ImageDelta};
+use egui::{ClippedPrimitive, TexturesDelta, ImageData};
 use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
@@ -165,10 +166,9 @@ impl Painter {
                 .iter()
                 .flat_map(|c| c.to_array())
                 .collect::<Vec<_>>(),
-            ImageData::Alpha(image) => image
-                .pixels
-                .iter()
-                .flat_map(|&r| vec![r, r, r, r])
+            ImageData::Font(image) => image
+                .srgba_pixels(1.0)
+                .flat_map(|c| c.to_array())
                 .collect::<Vec<_>>(),
         };
         let img_buffer = CpuAccessibleBuffer::from_iter(
@@ -259,7 +259,7 @@ impl Painter {
             .next_subpass(Inline)?
             .bind_pipeline_graphics(self.pipeline.clone());
 
-        let clipped_meshes: Vec<ClippedMesh> = egui_ctx.tessellate(clipped_shapes);
+        let clipped_meshes: Vec<ClippedPrimitive> = egui_ctx.tessellate(clipped_shapes);
         let num_meshes = clipped_meshes.len();
 
         let mut verts = Vec::<Vertex>::with_capacity(num_meshes * 4);
@@ -269,7 +269,7 @@ impl Painter {
         let mut offsets = Vec::<(usize, usize)>::with_capacity(num_meshes);
 
         for cm in clipped_meshes.iter() {
-            let (clip, mesh) = (cm.0, &cm.1);
+            let (clip, mesh) = (cm.clip_rect, &cm.primitive);
 
             // Skip empty meshes
             if mesh.vertices.len() == 0 || mesh.indices.len() == 0 {

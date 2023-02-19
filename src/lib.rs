@@ -1,5 +1,5 @@
 //! [egui](https://docs.rs/egui) rendering backend for [Vulkano](https://docs.rs/vulkano).
-#![warn(missing_docs)]
+// #![warn(missing_docs)]
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;

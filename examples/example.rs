@@ -4,30 +4,34 @@
 /// * Second renderpass to draw the gui
 use std::collections::VecDeque;
 use std::convert::TryInto;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use egui::plot::{HLine, Line, Plot, Value, Values};
+use egui::plot::{HLine, Line, Plot, PlotPoints};
 use egui::{Color32, ColorImage, Ui};
 use egui_vulkano::UpdateTexturesResult;
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, SubpassContents, RenderPassBeginInfo};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo};
-use vulkano::format::Format;
+use vulkano::format::{Format, ClearValue};
 use vulkano::image::view::ImageView;
 use vulkano::image::{ImageAccess, ImageUsage, SwapchainImage};
 use vulkano::instance::{Instance, InstanceCreateInfo};
+use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::graphics::viewport::ViewportState;
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError};
+use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
 use vulkano::sync::{FenceSignalFuture, FlushError, GpuFuture};
-use vulkano::{swapchain, sync};
+use vulkano::{swapchain, sync, VulkanLibrary};
 use vulkano_win::VkSurfaceBuild;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -60,72 +64,112 @@ impl<F: GpuFuture> AsMut<dyn GpuFuture> for FrameEndFuture<F> {
     }
 }
 
+pub fn get_physical_device_and_queue_family_index(
+    instance: &Arc<Instance>,
+    device_extensions: DeviceExtensions,
+    surface: Arc<vulkano::swapchain::Surface>
+) -> (Arc<PhysicalDevice>, u32) {
+    // get our physical device and queue family
+    let (physical_device, queue_family_index) = instance
+        .enumerate_physical_devices()
+        .unwrap()
+        .filter(|p| { // filter to devices that contain desired features
+            p.supported_extensions().contains(&device_extensions)
+        })
+        .filter_map(|p| { // filter queue families to ones that support graphics
+            p.queue_family_properties() // TODO : pick beter queue families since this is one single queue
+                .iter()
+                .enumerate()
+                .position(|(i, q)| {
+                    // We select a queue family that supports graphics operations. When drawing to
+                    // a window surface, as we do in this example, we also need to check that queues
+                    // in this queue family are capable of presenting images to the surface.
+                    // q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                    //     && p.surface_support(i as u32, &surface).unwrap_or(false)
+                    q.queue_flags.graphics && p.surface_support(i as u32, &surface).unwrap_or(false)
+                })
+                // The code here searches for the first queue family that is suitable. If none is
+                // found, `None` is returned to `filter_map`, which disqualifies this physical
+                // device.
+                .map(|i| (p, i as u32))
+        })
+        .min_by_key(|(p, _)| {
+            // We assign a lower score to device types that are likely to be faster/better.
+            match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
+            }
+        })
+        .expect("No suitable physical device found");
+
+        (physical_device, queue_family_index)
+}
+
 fn main() {
-    let required_extensions = vulkano_win::required_extensions();
-    let instance = Instance::new(InstanceCreateInfo {
+    let library = VulkanLibrary::new().unwrap();
+    let required_extensions = vulkano_win::required_extensions(&library);
+    let instance = Instance::new(
+        library,
+        InstanceCreateInfo {
         enabled_extensions: required_extensions,
         ..Default::default()
     })
     .unwrap();
 
-    let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
-
-    println!(
-        "Using device: {} (type: {:?})",
-        physical.properties().device_name,
-        physical.properties().device_type,
-    );
-
     let event_loop = EventLoop::new();
     let surface = WindowBuilder::new()
         .with_title("egui_vulkano demo")
-        .with_fullscreen(Some(Fullscreen::Borderless(None)))
+        // .with_fullscreen(Some(Fullscreen::Borderless(None)))
         .build_vk_surface(&event_loop, instance.clone())
         .unwrap();
 
     let device_extensions = DeviceExtensions {
         khr_swapchain: true,
-        ..DeviceExtensions::none()
+        ..DeviceExtensions::empty()
     };
 
-    let (physical_device, queue_family) = PhysicalDevice::enumerate(&instance)
-        .filter(|&p| p.supported_extensions().is_superset_of(&device_extensions))
-        .filter_map(|p| {
-            p.queue_families()
-                .find(|&q| q.supports_graphics() && q.supports_surface(&surface).unwrap_or(false))
-                .map(|q| (p, q))
-        })
-        .min_by_key(|(p, _)| match p.properties().device_type {
-            PhysicalDeviceType::DiscreteGpu => 0,
-            PhysicalDeviceType::IntegratedGpu => 1,
-            PhysicalDeviceType::VirtualGpu => 2,
-            PhysicalDeviceType::Cpu => 3,
-            PhysicalDeviceType::Other => 4,
-        })
-        .unwrap();
+    let (physical_device, queue_family_index) = get_physical_device_and_queue_family_index(
+        &instance,
+        device_extensions,
+        surface.clone()
+    );
 
-    let (device, mut queues) = Device::new(
-        physical_device,
-        DeviceCreateInfo {
-            enabled_extensions: physical_device
-                .required_extensions()
-                .union(&device_extensions),
-            queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
+    // let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
+
+    println!(
+        "Using device: {} (type: {:?})",
+        physical_device.properties().device_name,
+        physical_device.properties().device_type,
+    );
+
+    let (mut device, mut queues) = Device::new(
+        physical_device.clone().into(),
+        DeviceCreateInfo{
+            enabled_extensions: device_extensions,
+            queue_create_infos: vec![QueueCreateInfo {
+                queue_family_index,
+                ..Default::default()
+            }],
             ..Default::default()
         },
-    )
-    .unwrap();
+    ).unwrap();
 
     let queue = queues.next().unwrap();
 
     let (mut swapchain, images) = {
+        let binding = surface.clone();
+        let window = Arc::new(binding.object().unwrap().downcast_ref::<Window>().unwrap());
         let caps = physical_device
             .surface_capabilities(&surface, Default::default())
             .unwrap();
         let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
 
         let image_format = Some(Format::B8G8R8A8_SRGB);
-        let image_extent: [u32; 2] = surface.window().inner_size().into();
+        let image_extent: [u32; 2] = window.inner_size().into();
 
         Swapchain::new(
             device.clone(),
@@ -134,7 +178,10 @@ fn main() {
                 min_image_count: caps.min_image_count,
                 image_format,
                 image_extent,
-                image_usage: ImageUsage::color_attachment(),
+                image_usage: ImageUsage {
+                    color_attachment: true,
+                    ..ImageUsage::empty()
+                },
                 composite_alpha,
 
                 ..Default::default()
@@ -142,6 +189,10 @@ fn main() {
         )
         .unwrap()
     };
+
+    let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+    let cmd_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(device.clone(), Default::default()));
+    let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(device.clone()));
 
     #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
     #[repr(C)]
@@ -152,8 +203,11 @@ fn main() {
 
     let vertex_buffer = {
         CpuAccessibleBuffer::from_iter(
-            device.clone(),
-            BufferUsage::all(),
+            &memory_allocator.clone(),
+            BufferUsage {
+                vertex_buffer: true,
+                ..BufferUsage::empty()
+            },
             false,
             [
                 Vertex {
@@ -242,16 +296,17 @@ fn main() {
 
     let mut recreate_swapchain = false;
 
-    let mut previous_frame_end = Some(FrameEndFuture::now(device.clone()));
+    let mut previous_frame_end = Some(sync::now(device.clone()).boxed());
 
     //Set up everything need to draw the gui
-    let window = surface.window();
     let egui_ctx = egui::Context::default();
-    // let mut egui_winit = egui_winit::State::new(4096, window);
-    let mut egui_winit = egui_winit::State::from_pixels_per_point(4096, 2.0);
+    let mut egui_winit = egui_winit::State::new(event_loop.deref());
+    // let mut egui_winit = egui_winit::State::from_pixels_per_point(4096, 2.0);
 
     let mut egui_painter = egui_vulkano::Painter::new(
         device.clone(),
+        memory_allocator.clone(),
+        descriptor_set_allocator.clone(),
         queue.clone(),
         Subpass::from(render_pass.clone(), 1).unwrap(),
     )
@@ -262,7 +317,11 @@ fn main() {
     let mut egui_test = egui_demo_lib::ColorTest::default();
     let mut demo_windows = egui_demo_lib::DemoWindows::default();
     let mut egui_bench = Benchmark::new(1000);
-    let mut my_texture = egui_ctx.load_texture("my_texture", ColorImage::example());
+    let mut my_texture = egui_ctx.load_texture(
+        "my_texture",
+        ColorImage::example(),
+        Default::default()
+    );
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -279,8 +338,8 @@ fn main() {
                 recreate_swapchain = true;
             }
             Event::WindowEvent { event, .. } => {
-                let egui_consumed_event = egui_winit.on_event(&egui_ctx, &event);
-                if !egui_consumed_event {
+                let event_response = egui_winit.on_event(&egui_ctx, &event);
+                if !event_response.consumed {
                     // do your own event handling here
                 };
             }
@@ -292,10 +351,12 @@ fn main() {
                     .cleanup_finished();
 
                 if recreate_swapchain {
-                    let dimensions: [u32; 2] = surface.window().inner_size().into();
+                    let binding = surface.clone();
+                    let window = Arc::new(binding.object().unwrap().downcast_ref::<Window>().unwrap());
+                    let dimensions: [u32; 2] = window.inner_size().into();
                     let (new_swapchain, new_images) =
                         match swapchain.recreate(SwapchainCreateInfo {
-                            image_extent: surface.window().inner_size().into(),
+                            image_extent: window.inner_size().into(),
                             ..swapchain.create_info()
                         }) {
                             Ok(r) => r,
@@ -327,17 +388,22 @@ fn main() {
                     recreate_swapchain = true;
                 }
 
-                let clear_values = vec![[0.0, 0.0, 1.0, 1.0].into()];
+                let clear_values = vec![ClearValue::Float([0.0, 0.0, 1.0, 1.0]).into()];
                 let mut builder = AutoCommandBufferBuilder::primary(
-                    device.clone(),
-                    queue.family(),
+                    &cmd_buffer_allocator,
+                    queue.queue_family_index(),
                     CommandBufferUsage::OneTimeSubmit,
                 )
                 .unwrap();
 
-                let frame_start = Instant::now();
-                egui_ctx.begin_frame(egui_winit.take_egui_input(surface.window()));
-                demo_windows.ui(&egui_ctx);
+                let frame_start = {
+                    let binding = surface.clone();
+                    let window = Arc::new(binding.object().unwrap().downcast_ref::<Window>().unwrap());
+                    let frame_start = Instant::now();
+                    egui_ctx.begin_frame(egui_winit.take_egui_input(window.clone().as_ref()));
+                    demo_windows.ui(&egui_ctx);
+                    frame_start
+                };
 
                 egui::Window::new("Color test")
                     .vscroll(true)
@@ -359,27 +425,45 @@ fn main() {
                     ui.image(my_texture.id(), (200.0, 200.0));
                     if ui.button("Reload texture").clicked() {
                         // previous TextureHandle is dropped, causing egui to free the texture:
-                        my_texture = egui_ctx.load_texture("my_texture", ColorImage::example());
+                        my_texture = egui_ctx.load_texture(
+                            "my_texture",
+                            ColorImage::example(),
+                        Default::default()
+                    );
                     }
                 });
 
                 // Get the shapes from egui
-                let egui_output = egui_ctx.end_frame();
-                let platform_output = egui_output.platform_output;
-                egui_winit.handle_platform_output(surface.window(), &egui_ctx, platform_output);
+                let egui_output = {
+                    let binding = surface.clone();
+                    let window = Arc::new(binding.object().unwrap().downcast_ref::<Window>().unwrap());
+                    let egui_output = egui_ctx.end_frame();
+                    let platform_output = egui_output.platform_output.clone();
+                    egui_winit.handle_platform_output(window.as_ref(), &egui_ctx, platform_output);
+                    egui_output
+                };
 
-                let result = egui_painter
-                    .update_textures(egui_output.textures_delta, &mut builder)
+                let texture_future = egui_painter
+                    .update_textures(
+                        egui_output.textures_delta,
+                        cmd_buffer_allocator.clone()
+                    )
                     .expect("egui texture error");
 
-                let wait_for_last_frame = result == UpdateTexturesResult::Changed;
 
                 // Do your usual rendering
+
+                let render_pass_begin_info =  RenderPassBeginInfo{
+                    clear_values,
+                    ..RenderPassBeginInfo::framebuffer(
+                        framebuffers[image_num  as  usize].clone()
+                    )
+                };
+
                 builder
                     .begin_render_pass(
-                        framebuffers[image_num].clone(),
+                        render_pass_begin_info,
                         SubpassContents::Inline,
-                        clear_values,
                     )
                     .unwrap()
                     .set_viewport(0, [viewport.clone()])
@@ -391,15 +475,16 @@ fn main() {
                 // Build your gui
 
                 // Automatically start the next render subpass and draw the gui
-                let size = surface.window().inner_size();
-                let sf: f32 = surface.window().scale_factor() as f32;
+                let window = Arc::new(surface.object().unwrap().downcast_ref::<Window>().unwrap());
+                let size = window.inner_size();
+                let sf: f32 = window.scale_factor() as f32;
                 let sf = 1.0;
-                println!("pixels per point {:?}, sf {:?} width {:?} height {:?}",
-                    egui_ctx.pixels_per_point(),
-                    surface.window().scale_factor() as f32,
-                    size.width,
-                    size.height
-                );
+                // println!("pixels per point {:?}, sf {:?} width {:?} height {:?}",
+                //     egui_ctx.pixels_per_point(),
+                //     window.scale_factor() as f32,
+                //     size.width,
+                //     size.height
+                // );
                 // egui_painter.set_clip_rect(egui::Rect::from_two_pos(egui::Pos2::new(0.0, 0.0), egui::Pos2::new(size.width as f32, size.height as f32)));
                 egui_ctx.set_pixels_per_point(1.0);
                 egui_painter
@@ -417,34 +502,37 @@ fn main() {
                 builder.end_render_pass().unwrap();
 
                 let command_buffer = builder.build().unwrap();
-
-                if wait_for_last_frame {
-                    if let Some(FrameEndFuture::FenceSignalFuture(ref mut f)) = previous_frame_end {
-                        f.wait(None).unwrap();
-                    }
+                let mut future_mut =  acquire_future.join(texture_future).boxed();
+                if let Some(future) = previous_frame_end.take() {
+                    future_mut = future_mut.join(future).boxed();
                 }
 
-                let future = previous_frame_end
-                    .take()
+                let future = future_mut
+                    .then_execute(
+                        queue.clone(),
+                        command_buffer
+                    )
                     .unwrap()
-                    .get()
-                    .join(acquire_future)
-                    .then_execute(queue.clone(), command_buffer)
-                    .unwrap()
-                    .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
+                    .then_swapchain_present(
+                        queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(
+                            swapchain.clone(),
+                            image_num
+                        )
+                    )
                     .then_signal_fence_and_flush();
 
                 match future {
                     Ok(future) => {
-                        previous_frame_end = Some(FrameEndFuture::FenceSignalFuture(future));
+                        previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                     Err(FlushError::OutOfDate) => {
                         recreate_swapchain = true;
-                        previous_frame_end = Some(FrameEndFuture::now(device.clone()));
+                        previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                     Err(e) => {
                         println!("Failed to flush future: {:?}", e);
-                        previous_frame_end = Some(FrameEndFuture::now(device.clone()));
+                        previous_frame_end = Some(sync::now(device.clone()).boxed());
                     }
                 }
             }
@@ -454,7 +542,7 @@ fn main() {
 }
 
 fn window_size_dependent_setup(
-    images: &[Arc<SwapchainImage<Window>>],
+    images: &[Arc<SwapchainImage>],
     render_pass: Arc<RenderPass>,
     viewport: &mut Viewport,
 ) -> Vec<Arc<Framebuffer>> {
@@ -491,12 +579,12 @@ impl Benchmark {
     }
 
     pub fn draw(&self, ui: &mut Ui) {
-        let iter = self
-            .data
-            .iter()
-            .enumerate()
-            .map(|(i, v)| Value::new(i as f64, *v * 1000.0));
-        let curve = Line::new(Values::from_values_iter(iter)).color(Color32::BLUE);
+
+        let curve = Line::new(PlotPoints::from_explicit_callback(
+            move |x| 0.5 * (2.0 * x).sin(),
+            ..,
+            512
+        )).color(Color32::BLUE);
         let target = HLine::new(1000.0 / 60.0).color(Color32::RED);
 
         ui.label("Time in milliseconds that the gui took to draw:");

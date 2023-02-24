@@ -478,13 +478,13 @@ fn main() {
                 let window = Arc::new(surface.object().unwrap().downcast_ref::<Window>().unwrap());
                 let size = window.inner_size();
                 let sf: f32 = window.scale_factor() as f32;
-                let sf = 1.0;
-                // println!("pixels per point {:?}, sf {:?} width {:?} height {:?}",
-                //     egui_ctx.pixels_per_point(),
-                //     window.scale_factor() as f32,
-                //     size.width,
-                //     size.height
-                // );
+                // let sf = 1.0;
+                println!("pixels per point {:?}, sf {:?} width {:?} height {:?}",
+                    egui_ctx.pixels_per_point(),
+                    window.scale_factor() as f32,
+                    size.width,
+                    size.height
+                );
                 // egui_painter.set_clip_rect(egui::Rect::from_two_pos(egui::Pos2::new(0.0, 0.0), egui::Pos2::new(size.width as f32, size.height as f32)));
                 egui_ctx.set_pixels_per_point(1.0);
                 egui_painter

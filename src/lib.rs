@@ -22,13 +22,13 @@ use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
 use vulkano::image::immutable::ImmutableImageCreationError;
 use vulkano::image::{
-    ImageCreateFlags, ImageDimensions, ImageUsage, StorageImage, ImmutableImage, ImageLayout, MipmapsCount, ImageAccess
+    ImageCreateFlags, ImageDimensions, ImageUsage, ImmutableImage, ImageLayout, MipmapsCount, ImageAccess
 };
 use vulkano::image::sys::ImageError;
 use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
-use vulkano::pipeline::graphics::viewport::{Scissor, ViewportState};
+use vulkano::pipeline::graphics::viewport::{Scissor, ViewportState, Viewport};
 use vulkano::pipeline::graphics::{GraphicsPipeline, GraphicsPipelineCreationError};
 use vulkano::pipeline::Pipeline;
 use vulkano::pipeline::PipelineBindPoint;
@@ -69,7 +69,7 @@ impl From<&egui::epaint::Vertex> for Vertex {
 vulkano::impl_vertex!(Vertex, pos, uv, color);
 
 use thiserror::Error;
-use vulkano::command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAlloc, StandardCommandBufferAllocator};
+use vulkano::command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator};
 use vulkano::command_buffer::CopyBufferToImageInfo;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
 use vulkano::memory::allocator::AllocationCreationError;
@@ -173,43 +173,6 @@ impl Painter {
         })
     }
 
-    fn write_image_delta<P>(
-        &mut self,
-        image: Arc<StorageImage>,
-        delta: &ImageDelta,
-        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
-    ) -> Result<(), UpdateTexturesError>
-    where
-        P: CommandBufferAllocator,
-    {
-        let image_data = match &delta.image {
-            ImageData::Color(image) => image
-                .pixels
-                .iter()
-                .flat_map(|c| c.to_array())
-                .collect::<Vec<_>>(),
-            ImageData::Font(image) => image
-                .srgba_pixels(Some(1.0))
-                .flat_map(|c| c.to_array())
-                .collect::<Vec<_>>(),
-        };
-
-        let mut buffer_usage = BufferUsage::empty();
-        buffer_usage.transfer_src = true;
-
-        let img_buffer = CpuAccessibleBuffer::from_iter(
-            &self.memory_allocator.clone(),
-            buffer_usage,
-            false,
-            image_data,
-        )?;
-
-        builder.copy_buffer_to_image(
-            CopyBufferToImageInfo::buffer_image(img_buffer, image)
-        )?;
-        Ok(())
-    }
-
     /// Uploads all newly created and modified textures to the GPU.
     /// Has to be called before entering the first render pass.  
     /// If the return value is [`UpdateTexturesResult::Changed`],
@@ -287,7 +250,7 @@ impl Painter {
     }
 
     /// Free textures freed by egui, *after* drawing
-    fn free_textures(&mut self) {
+    pub fn free_textures(&mut self) {
         for texture_id in &self.texture_free_queue {
             self.texture_sets.remove(texture_id);
             self.images.remove(texture_id);
@@ -303,13 +266,15 @@ impl Painter {
         window_size_points: [f32; 2],
         egui_ctx: &Context,
         clipped_shapes: Vec<ClippedShape>,
+        viewport: Viewport,
     ) -> Result<(), DrawError>
     where
         P: CommandBufferAllocator,
     {
         builder
             .next_subpass(Inline)?
-            .bind_pipeline_graphics(self.pipeline.clone());
+            .bind_pipeline_graphics(self.pipeline.clone())
+            .set_viewport(0, [viewport]);
 
         let clipped_primitives: Vec<ClippedPrimitive> = egui_ctx.tessellate(clipped_shapes);
         let num_meshes = clipped_primitives.len();
@@ -380,14 +345,14 @@ impl Painter {
             }
 
             builder
-                .bind_vertex_buffers(0, vb_slice.clone())
-                .bind_index_buffer(ib_slice.clone())
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
                     self.pipeline.layout().clone(),
                     0,
                     texture_set.unwrap().clone(),
                 )
+                .bind_vertex_buffers(0, vb_slice.clone())
+                .bind_index_buffer(ib_slice.clone())
                 .push_constants(self.pipeline.layout().clone(), 0, window_size_points)
                 .draw_indexed(ib_slice.len() as u32, 1, 0, 0, 0)?;
         }
@@ -468,39 +433,6 @@ fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationEr
             ..Default::default()
         },
     )
-}
-
-/// Create a Vulkano image for the given egui texture
-fn create_image(
-    queue: Arc<Queue>,
-    texture: &ImageData,
-    memory_allocator: Arc<StandardMemoryAllocator>
-) -> Result<Arc<StorageImage>, ImageError> {
-    let dimensions = ImageDimensions::Dim2d {
-        width: texture.width() as u32,
-        height: texture.height() as u32,
-        array_layers: 1,
-    };
-
-    let format = Format::R8G8B8A8_SRGB;
-
-    let usage = ImageUsage {
-        transfer_dst: true,
-        sampled: true,
-        storage: false,
-        ..ImageUsage::empty()
-    };
-
-    let image = StorageImage::with_usage(
-        &memory_allocator,
-        dimensions,
-        format,
-        usage,
-        ImageCreateFlags::empty(),
-        [queue.queue_family_index()]
-    )?;
-
-    Ok(image)
 }
 
 fn create_immutable_image_full(

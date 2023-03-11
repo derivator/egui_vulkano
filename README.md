@@ -31,7 +31,7 @@ egui_painter
     .draw(
         &mut builder, // your vulkano AutoCommandBufferBuilder
         [width, height], // window size
-        &egui_ctx, // your egui CtxRef
+        &egui_ctx, // your egui Context
         egui_output.shapes // shapes from egui,
     )
     .unwrap();

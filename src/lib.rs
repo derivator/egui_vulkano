@@ -12,7 +12,7 @@ use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, PrimaryAutoCommandBuffer, CopyImageInfo, BufferImageCopy, CommandBufferUsage, CommandBufferBeginError, PrimaryCommandBufferAbstract,
+    AutoCommandBufferBuilder, PrimaryAutoCommandBuffer, CopyImageInfo, BufferImageCopy, CommandBufferBeginError,
 };
 use vulkano::descriptor_set::{
     DescriptorSetCreationError, PersistentDescriptorSet, WriteDescriptorSet,
@@ -69,7 +69,7 @@ impl From<&egui::epaint::Vertex> for Vertex {
 vulkano::impl_vertex!(Vertex, pos, uv, color);
 
 use thiserror::Error;
-use vulkano::command_buffer::allocator::{CommandBufferAllocator, StandardCommandBufferAllocator};
+use vulkano::command_buffer::allocator::CommandBufferAllocator;
 use vulkano::command_buffer::CopyBufferToImageInfo;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
 use vulkano::memory::allocator::AllocationCreationError;
@@ -79,7 +79,6 @@ use vulkano::render_pass::Subpass;
 use vulkano::command_buffer::RenderPassError;
 use vulkano::command_buffer::CopyError;
 use vulkano::command_buffer::PipelineExecutionError;
-use vulkano::sync::GpuFuture;
 
 #[allow(missing_docs)]
 #[derive(Error, Debug)]
@@ -181,72 +180,62 @@ impl Painter {
     pub fn update_textures(
         &mut self,
         textures_delta: TexturesDelta,
-        command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-        // builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer, Arc<StandardCommandBufferAllocator>>
-    ) -> Result<impl GpuFuture, UpdateTexturesError>
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>
+    ) -> Result<UpdateTexturesResult, UpdateTexturesError>
     {
         for texture_id in textures_delta.free {
             self.texture_free_queue.push(texture_id);
         }
-
-        let mut builder = AutoCommandBufferBuilder::primary(
-            &command_buffer_allocator,
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        ).map_err(UpdateTexturesError::from)?;
+    
+        let mut result = UpdateTexturesResult::Unchanged;
 
         for (texture_id, delta) in &textures_delta.set {
-
-                let image = if let Some(image) = self.images.remove(texture_id) {
-                    if delta.is_whole() {
-                        create_immutable_image_full(
-                            &self.queue,
-                            &delta.image,
-                            // &mut cbb,
-                            &mut builder,
-                            self.memory_allocator.clone()
-                        )?
-                    } else {
-                        create_immutable_image_part(
-                            &self.queue,
-                            &delta,
-                            &image,
-                            // &mut cbb,
-                            &mut builder,
-                            self.memory_allocator.clone()
-                        )?
-                    }
-                } else {
+            let image = if let Some(image) = self.images.remove(texture_id) {
+                result = UpdateTexturesResult::Changed; //modifying an existing image that might be in use
+                if delta.is_whole() {
                     create_immutable_image_full(
                         &self.queue,
                         &delta.image,
                         // &mut cbb,
-                        &mut builder,
+                        builder,
                         self.memory_allocator.clone()
                     )?
-                };
-                let layout = &self.pipeline.layout().set_layouts()[0];
+                } else {
+                    create_immutable_image_part(
+                        &self.queue,
+                        &delta,
+                        &image,
+                        // &mut cbb,
+                        builder,
+                        self.memory_allocator.clone()
+                    )?
+                }
+            } else {
+                create_immutable_image_full(
+                    &self.queue,
+                    &delta.image,
+                    // &mut cbb,
+                    builder,
+                    self.memory_allocator.clone()
+                )?
+            };
+            let layout = &self.pipeline.layout().set_layouts()[0];
 
-                let set = PersistentDescriptorSet::new(
-                    &self.descriptor_set_allocator,
-                    layout.clone(),
-                    [WriteDescriptorSet::image_view_sampler(
-                        0,
-                        ImageView::new_default(image.clone())?,
-                        self.sampler.clone(),
-                    )],
-                )?;
+            let set = PersistentDescriptorSet::new(
+                &self.descriptor_set_allocator,
+                layout.clone(),
+                [WriteDescriptorSet::image_view_sampler(
+                    0,
+                    ImageView::new_default(image.clone())?,
+                    self.sampler.clone(),
+                )],
+            )?;
 
-                self.texture_sets.insert(*texture_id, set);
-                self.images.insert(*texture_id, image.clone());
+            self.texture_sets.insert(*texture_id, set);
+            self.images.insert(*texture_id, image.clone());
         }
-        let cb = builder.build().unwrap();
 
-        let future = match cb.execute(self.queue.clone()) {
-            Ok(f) => f,
-            Err(e) => unreachable!("{:?}", e),
-        };
-        Ok(future)
+        Ok(result)
     }
 
     /// Free textures freed by egui, *after* drawing
@@ -406,7 +395,7 @@ fn create_pipeline(
     let vs = shaders::vs::load(device.clone()).unwrap();
     let fs = shaders::fs::load(device.clone()).unwrap();
 
-    let mut blend = AttachmentBlend {
+    let blend = AttachmentBlend {
         color_op: BlendOp::Add,
         color_source: BlendFactor::One,
         color_destination: BlendFactor::OneMinusSrcAlpha,
@@ -444,7 +433,7 @@ fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationEr
 fn create_immutable_image_full(
     queue: &Arc<Queue>,
     texture: &ImageData,
-    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer, Arc<StandardCommandBufferAllocator>>,
+    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     allocator: Arc<StandardMemoryAllocator>,
 ) -> Result<Arc<ImmutableImage>, ImmutableImageCreationError> {
     let dimensions = ImageDimensions::Dim2d {
@@ -506,7 +495,7 @@ fn create_immutable_image_part(
     queue: &Arc<Queue>,
     delta: &ImageDelta,
     old: &Arc<ImmutableImage>,
-    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer, Arc<StandardCommandBufferAllocator>>,
+    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     allocator: Arc<StandardMemoryAllocator>,
 ) -> Result<Arc<ImmutableImage>, ImmutableImageCreationError> {
 

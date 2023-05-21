@@ -1,5 +1,5 @@
 //! [egui](https://docs.rs/egui) rendering backend for [Vulkano](https://docs.rs/vulkano).
-#![warn(missing_docs)]
+// #![warn(missing_docs)]
 use std::collections::HashMap;
 use std::default::Default;
 use std::sync::Arc;
@@ -12,21 +12,23 @@ use egui::{Color32, Context, Rect, TextureId};
 use vulkano::buffer::{BufferAccess, BufferSlice, BufferUsage, CpuAccessibleBuffer};
 use vulkano::command_buffer::SubpassContents::Inline;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, AutoCommandBufferBuilderContextError, CopyBufferImageError,
-    DrawIndexedError, PrimaryAutoCommandBuffer,
+    AutoCommandBufferBuilder, PrimaryAutoCommandBuffer, CopyImageInfo, BufferImageCopy, CommandBufferBeginError,
 };
 use vulkano::descriptor_set::{
     DescriptorSetCreationError, PersistentDescriptorSet, WriteDescriptorSet,
 };
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::device::{Device, Queue};
 use vulkano::format::Format;
+use vulkano::image::immutable::ImmutableImageCreationError;
 use vulkano::image::{
-    ImageCreateFlags, ImageCreationError, ImageDimensions, ImageUsage, StorageImage,
+    ImageCreateFlags, ImageDimensions, ImageUsage, ImmutableImage, ImageLayout, MipmapsCount, ImageAccess
 };
-use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState};
+use vulkano::image::sys::ImageError;
+use vulkano::pipeline::graphics::color_blend::{AttachmentBlend, BlendFactor, ColorBlendState, BlendOp};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
-use vulkano::pipeline::graphics::viewport::{Scissor, ViewportState};
+use vulkano::pipeline::graphics::viewport::{Scissor, ViewportState, Viewport};
 use vulkano::pipeline::graphics::{GraphicsPipeline, GraphicsPipelineCreationError};
 use vulkano::pipeline::Pipeline;
 use vulkano::pipeline::PipelineBindPoint;
@@ -67,12 +69,18 @@ impl From<&egui::epaint::Vertex> for Vertex {
 vulkano::impl_vertex!(Vertex, pos, uv, color);
 
 use thiserror::Error;
-use vulkano::command_buffer::pool::CommandPoolBuilderAlloc;
+use vulkano::command_buffer::allocator::CommandBufferAllocator;
+use vulkano::command_buffer::CopyBufferToImageInfo;
 use vulkano::image::view::{ImageView, ImageViewCreationError};
-use vulkano::memory::DeviceMemoryAllocationError;
+use vulkano::memory::allocator::AllocationCreationError;
+use vulkano::memory::allocator::StandardMemoryAllocator;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::render_pass::Subpass;
+use vulkano::command_buffer::RenderPassError;
+use vulkano::command_buffer::CopyError;
+use vulkano::command_buffer::PipelineExecutionError;
 
+#[allow(missing_docs)]
 #[derive(Error, Debug)]
 pub enum PainterCreationError {
     #[error(transparent)]
@@ -81,6 +89,7 @@ pub enum PainterCreationError {
     CreateSamplerFailed(#[from] SamplerCreationError),
 }
 
+#[allow(missing_docs)]
 #[derive(Error, Debug)]
 pub enum UpdateTexturesError {
     #[error(transparent)]
@@ -88,23 +97,30 @@ pub enum UpdateTexturesError {
     #[error(transparent)]
     BuildFailed(#[from] DescriptorSetCreationError),
     #[error(transparent)]
-    Alloc(#[from] DeviceMemoryAllocationError),
+    Alloc(#[from] AllocationCreationError),
     #[error(transparent)]
-    Copy(#[from] CopyBufferImageError),
+    Copy(#[from] CopyError),
     #[error(transparent)]
-    CreateImage(#[from] ImageCreationError),
+    CreateImage(#[from] ImageError),
+    #[error(transparent)]
+    CommandBufferError(#[from] CommandBufferBeginError),
+    #[error(transparent)]
+    ImmutableImageCreateError(#[from] ImmutableImageCreationError),
+    #[error("No Egui State")]
+    NoEguiState
 }
 
+#[allow(missing_docs)]
 #[derive(Error, Debug)]
 pub enum DrawError {
     #[error(transparent)]
     UpdateSetFailed(#[from] UpdateTexturesError),
     #[error(transparent)]
-    NextSubpassFailed(#[from] AutoCommandBufferBuilderContextError),
+    CreateBuffersFailed(#[from] AllocationCreationError),
     #[error(transparent)]
-    CreateBuffersFailed(#[from] DeviceMemoryAllocationError),
+    RenderPassError(#[from] RenderPassError),
     #[error(transparent)]
-    DrawIndexedFailed(#[from] DrawIndexedError),
+    PipelineError(#[from] PipelineExecutionError),
 }
 
 #[must_use = "You must use this to avoid attempting to modify a texture that's still in use"]
@@ -120,13 +136,14 @@ pub enum UpdateTexturesResult {
 
 /// Contains everything needed to render the gui.
 pub struct Painter {
-    device: Arc<Device>,
     queue: Arc<Queue>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     /// Graphics pipeline used to render the gui.
     pub pipeline: Arc<GraphicsPipeline>,
     /// Texture sampler used to render the gui.
     pub sampler: Arc<Sampler>,
-    images: HashMap<egui::TextureId, Arc<StorageImage>>,
+    images: HashMap<egui::TextureId, Arc<ImmutableImage>>,
     texture_sets: HashMap<egui::TextureId, Arc<PersistentDescriptorSet>>,
     texture_free_queue: Vec<egui::TextureId>,
 }
@@ -136,14 +153,17 @@ impl Painter {
     /// that you want to use to render the gui.
     pub fn new(
         device: Arc<Device>,
+        memory_allocator: Arc<StandardMemoryAllocator>,
+        descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
         queue: Arc<Queue>,
         subpass: Subpass,
     ) -> Result<Self, PainterCreationError> {
         let pipeline = create_pipeline(device.clone(), subpass.clone())?;
         let sampler = create_sampler(device.clone())?;
         Ok(Self {
-            device,
             queue,
+            memory_allocator,
+            descriptor_set_allocator,
             pipeline,
             sampler,
             images: Default::default(),
@@ -152,92 +172,74 @@ impl Painter {
         })
     }
 
-    fn write_image_delta<P>(
-        &mut self,
-        image: Arc<StorageImage>,
-        delta: &ImageDelta,
-        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
-    ) -> Result<(), UpdateTexturesError>
-    where
-        P: CommandPoolBuilderAlloc,
-    {
-        let image_data = match &delta.image {
-            ImageData::Color(image) => image
-                .pixels
-                .iter()
-                .flat_map(|c| c.to_array())
-                .collect::<Vec<_>>(),
-            ImageData::Font(image) => image
-                .srgba_pixels(1.0)
-                .flat_map(|c| c.to_array())
-                .collect::<Vec<_>>(),
-        };
-
-        let img_buffer = CpuAccessibleBuffer::from_iter(
-            self.device.clone(),
-            BufferUsage::transfer_source(),
-            false,
-            image_data,
-        )?;
-
-        let size = [delta.image.width() as u32, delta.image.height() as u32, 1];
-        let offset = match delta.pos {
-            None => [0, 0, 0],
-            Some(pos) => [pos[0] as u32, pos[1] as u32, 0],
-        };
-
-        builder.copy_buffer_to_image_dimensions(img_buffer, image, offset, size, 0, 1, 0)?;
-        Ok(())
-    }
-
     /// Uploads all newly created and modified textures to the GPU.
     /// Has to be called before entering the first render pass.  
     /// If the return value is [`UpdateTexturesResult::Changed`],
     /// a texture will be changed in this frame and you need to wait for the last frame to finish
     /// before submitting the command buffer for this frame.
-    pub fn update_textures<P>(
+    pub fn update_textures(
         &mut self,
         textures_delta: TexturesDelta,
-        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer<P::Alloc>, P>,
+        builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>
     ) -> Result<UpdateTexturesResult, UpdateTexturesError>
-    where
-        P: CommandPoolBuilderAlloc,
     {
         for texture_id in textures_delta.free {
             self.texture_free_queue.push(texture_id);
         }
-
+    
         let mut result = UpdateTexturesResult::Unchanged;
 
         for (texture_id, delta) in &textures_delta.set {
-            let image = if delta.is_whole() {
-                let image = create_image(self.queue.clone(), &delta.image)?;
-                let layout = &self.pipeline.layout().set_layouts()[0];
-
-                let set = PersistentDescriptorSet::new(
-                    layout.clone(),
-                    [WriteDescriptorSet::image_view_sampler(
-                        0,
-                        ImageView::new_default(image.clone())?,
-                        self.sampler.clone(),
-                    )],
-                )?;
-
-                self.texture_sets.insert(*texture_id, set);
-                self.images.insert(*texture_id, image.clone());
-                image
-            } else {
+            let image = if let Some(image) = self.images.remove(texture_id) {
                 result = UpdateTexturesResult::Changed; //modifying an existing image that might be in use
-                self.images[texture_id].clone()
+                if delta.is_whole() {
+                    create_immutable_image_full(
+                        &self.queue,
+                        &delta.image,
+                        // &mut cbb,
+                        builder,
+                        self.memory_allocator.clone()
+                    )?
+                } else {
+                    create_immutable_image_part(
+                        &self.queue,
+                        &delta,
+                        &image,
+                        // &mut cbb,
+                        builder,
+                        self.memory_allocator.clone()
+                    )?
+                }
+            } else {
+                create_immutable_image_full(
+                    &self.queue,
+                    &delta.image,
+                    // &mut cbb,
+                    builder,
+                    self.memory_allocator.clone()
+                )?
             };
-            self.write_image_delta(image, delta, builder)?;
+            let layout = &self.pipeline.layout().set_layouts()[0];
+
+            let set = PersistentDescriptorSet::new(
+                &self.descriptor_set_allocator,
+                layout.clone(),
+                [WriteDescriptorSet::image_view_sampler(
+                    0,
+                    ImageView::new_default(image.clone())?,
+                    self.sampler.clone(),
+                )],
+            )?;
+
+            self.texture_sets.insert(*texture_id, set);
+            self.images.insert(*texture_id, image.clone());
         }
 
         Ok(result)
     }
 
     /// Free textures freed by egui, *after* drawing
-    fn free_textures(&mut self) {
+    pub fn free_textures(&mut self) {
         for texture_id in &self.texture_free_queue {
             self.texture_sets.remove(texture_id);
             self.images.remove(texture_id);
@@ -253,13 +255,15 @@ impl Painter {
         window_size_points: [f32; 2],
         egui_ctx: &Context,
         clipped_shapes: Vec<ClippedShape>,
+        viewport: Viewport,
     ) -> Result<(), DrawError>
     where
-        P: CommandPoolBuilderAlloc,
+        P: CommandBufferAllocator,
     {
         builder
             .next_subpass(Inline)?
-            .bind_pipeline_graphics(self.pipeline.clone());
+            .bind_pipeline_graphics(self.pipeline.clone())
+            .set_viewport(0, [viewport]);
 
         let clipped_primitives: Vec<ClippedPrimitive> = egui_ctx.tessellate(clipped_shapes);
         let num_meshes = clipped_primitives.len();
@@ -303,15 +307,14 @@ impl Painter {
         if clips.len() == 0 {
             return Ok(());
         }
-
+        let ppp = egui_ctx.pixels_per_point();
         let (vertex_buf, index_buf) = self.create_buffers((verts, indices))?;
         for (idx, clip) in clips.iter().enumerate() {
             let mut scissors = Vec::with_capacity(1);
             let o = clip.min;
-            let (w, h) = (clip.width() as u32, clip.height() as u32);
             scissors.push(Scissor {
                 origin: [(o.x as u32), (o.y as u32)],
-                dimensions: [w, h],
+                dimensions: [(window_size_points[0] * ppp) as u32, (window_size_points[1] * ppp) as u32],
             });
             builder.set_scissor(0, scissors);
 
@@ -331,14 +334,14 @@ impl Painter {
             }
 
             builder
-                .bind_vertex_buffers(0, vb_slice.clone())
-                .bind_index_buffer(ib_slice.clone())
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
                     self.pipeline.layout().clone(),
                     0,
                     texture_set.unwrap().clone(),
                 )
+                .bind_vertex_buffers(0, vb_slice.clone())
+                .bind_index_buffer(ib_slice.clone())
                 .push_constants(self.pipeline.layout().clone(), 0, window_size_points)
                 .draw_indexed(ib_slice.len() as u32, 1, 0, 0, 0)?;
         }
@@ -355,21 +358,30 @@ impl Painter {
             Arc<CpuAccessibleBuffer<[Vertex]>>,
             Arc<CpuAccessibleBuffer<[u32]>>,
         ),
-        DeviceMemoryAllocationError,
+        AllocationCreationError,
     > {
+
+        let mut vertex_buffer_usage = BufferUsage::empty();
+        let mut index_buffer_usage = BufferUsage::empty();
+
+        vertex_buffer_usage.vertex_buffer = true;
+        index_buffer_usage.index_buffer = true;
+
         let vertex_buffer = CpuAccessibleBuffer::from_iter(
-            self.device.clone(),
-            BufferUsage::vertex_buffer(),
+            &self.memory_allocator,
+            vertex_buffer_usage,
             false,
             triangles.0.iter().cloned(),
-        )?;
+        )
+        .unwrap();
 
         let index_buffer = CpuAccessibleBuffer::from_iter(
-            self.device.clone(),
-            BufferUsage::index_buffer(),
+            &self.memory_allocator,
+            index_buffer_usage,
             false,
             triangles.1.iter().cloned(),
-        )?;
+        )
+        .unwrap();
 
         Ok((vertex_buffer, index_buffer))
     }
@@ -383,8 +395,14 @@ fn create_pipeline(
     let vs = shaders::vs::load(device.clone()).unwrap();
     let fs = shaders::fs::load(device.clone()).unwrap();
 
-    let mut blend = AttachmentBlend::alpha();
-    blend.color_source = BlendFactor::One;
+    let blend = AttachmentBlend {
+        color_op: BlendOp::Add,
+        color_source: BlendFactor::One,
+        color_destination: BlendFactor::OneMinusSrcAlpha,
+        alpha_op: BlendOp::Add,
+        alpha_source: BlendFactor::One,
+        alpha_destination: BlendFactor::OneMinusSrcAlpha,
+    };
 
     let pipeline = GraphicsPipeline::start()
         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
@@ -412,11 +430,12 @@ fn create_sampler(device: Arc<Device>) -> Result<Arc<Sampler>, SamplerCreationEr
     )
 }
 
-/// Create a Vulkano image for the given egui texture
-fn create_image(
-    queue: Arc<Queue>,
+fn create_immutable_image_full(
+    queue: &Arc<Queue>,
     texture: &ImageData,
-) -> Result<Arc<StorageImage>, ImageCreationError> {
+    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    allocator: Arc<StandardMemoryAllocator>,
+) -> Result<Arc<ImmutableImage>, ImmutableImageCreationError> {
     let dimensions = ImageDimensions::Dim2d {
         width: texture.width() as u32,
         height: texture.height() as u32,
@@ -425,21 +444,114 @@ fn create_image(
 
     let format = Format::R8G8B8A8_SRGB;
 
-    let usage = ImageUsage {
-        transfer_destination: true,
-        sampled: true,
-        storage: false,
-        ..ImageUsage::none()
+    let image_data = match texture {
+        ImageData::Color(image) => image
+            .pixels
+            .iter()
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
+        ImageData::Font(image) => image
+            .srgba_pixels(Some(1.0))
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
     };
 
-    let image = StorageImage::with_usage(
-        queue.device().clone(),
-        dimensions,
-        format,
-        usage,
-        ImageCreateFlags::none(),
-        [queue.family()],
+    let img_buffer = CpuAccessibleBuffer::from_iter(
+        &allocator,
+        BufferUsage {
+            transfer_src: true,
+            ..Default::default()
+        },
+        false,
+        image_data,
     )?;
 
+
+    let flags = ImageCreateFlags::empty();
+    let layout = ImageLayout::ShaderReadOnlyOptimal;
+    let usage = ImageUsage {
+        transfer_dst: true,
+        transfer_src: true,
+        sampled: true,
+        ..ImageUsage::empty()
+    };
+    let (image, initializer) = ImmutableImage::uninitialized(
+        &allocator,
+        dimensions,
+        format,
+        MipmapsCount::One,
+        usage,
+        flags,
+        layout,
+        vec![queue.queue_family_index()],
+    )?;
+
+    cbb.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(img_buffer, initializer)).unwrap();
+
+    Ok(image)
+}
+
+fn create_immutable_image_part(
+    queue: &Arc<Queue>,
+    delta: &ImageDelta,
+    old: &Arc<ImmutableImage>,
+    cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+    allocator: Arc<StandardMemoryAllocator>,
+) -> Result<Arc<ImmutableImage>, ImmutableImageCreationError> {
+
+    let image_data = match &delta.image {
+        ImageData::Color(image) => image
+            .pixels
+            .iter()
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
+        ImageData::Font(image) => image
+            .srgba_pixels(Some(1.0))
+            .flat_map(|c| c.to_array())
+            .collect::<Vec<_>>(),
+    };
+
+    let img_buffer = CpuAccessibleBuffer::from_iter(
+        &allocator,
+        BufferUsage {
+            transfer_src: true,
+            ..Default::default()
+        },
+        false,
+        image_data,
+    )?;
+
+    let flags = ImageCreateFlags::empty();
+    let layout = ImageLayout::ShaderReadOnlyOptimal;
+
+    let (image, initializer) = ImmutableImage::uninitialized(
+        &allocator,
+        old.dimensions(),
+        old.format(),
+        MipmapsCount::One,
+        old.usage().clone(),
+        flags,
+        layout,
+        vec![queue.queue_family_index()],
+    )?;
+
+    cbb.copy_image(CopyImageInfo::images(old.clone(), initializer.clone())).unwrap();
+
+    let size = [delta.image.width() as u32, delta.image.height() as u32, 1];
+    let offset = match delta.pos {
+        None => [0, 0, 0],
+        Some(pos) => [pos[0] as u32, pos[1] as u32, 0],
+    };
+    cbb.copy_buffer_to_image(CopyBufferToImageInfo {
+        regions: [
+            BufferImageCopy {
+                image_extent: size,
+                image_offset: offset,
+                image_subresource: initializer.subresource_layers(),
+                ..Default::default()
+            }
+        ].into(),
+        ..CopyBufferToImageInfo::buffer_image(img_buffer, initializer)
+    }).unwrap();
     Ok(image)
 }
